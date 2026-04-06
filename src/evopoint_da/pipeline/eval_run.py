@@ -1,18 +1,22 @@
+"""Conformal calibration evaluation pipeline.
+
+This module hosts the executable logic originally kept in scripts/eval_run.py
+so the training/inference pipeline code lives under src/ for easier reuse/import.
+"""
+
 import argparse
 import json
 import os
-import sys
 
 import numpy as np
 import torch
 from omegaconf import OmegaConf
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "../src"))
 from evopoint_da.data.datamodule import EvoPointDataModule
 from evopoint_da.models.module import EvoPointLitModule
 
 
-def get_args():
+def get_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Compute conformal q-hat from calibration set.")
     p.add_argument("--ckpt", required=True)
     p.add_argument("--data_dir", default="data/processed_graphs")
@@ -25,10 +29,11 @@ def get_args():
     p.add_argument("--calib_batch_size", type=int, default=None)
     p.add_argument("--split_seed", type=int, default=None)
     p.add_argument("--fallback_num_features", type=int, default=None)
+    p.add_argument("--dump_scores", action="store_true", help="Also dump raw calibration scores in output JSON")
     return p.parse_args()
 
 
-def main():
+def main() -> None:
     args = get_args()
     cfg = OmegaConf.load(args.data_cfg) if os.path.exists(args.data_cfg) else OmegaConf.create({})
     dm_kwargs = {
@@ -60,11 +65,24 @@ def main():
     scores = np.array(scores, dtype=np.float32)
     n = len(scores)
     q = np.quantile(scores, min(1.0, np.ceil((n + 1) * (1 - args.alpha)) / n), method="higher") if n > 0 else float("nan")
+    quantiles = {}
+    for pctl in (50, 90, 95, 99):
+        quantiles[f"p{pctl}"] = float(np.percentile(scores, pctl)) if n > 0 else float("nan")
 
     output_dir = os.path.dirname(args.output)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-    payload = {"alpha": args.alpha, "num_calibration_nodes": int(n), "qhat": float(q)}
+    payload = {
+        "alpha": args.alpha,
+        "num_calibration_nodes": int(n),
+        "qhat": float(q),
+        "score_quantiles": quantiles,
+        "score_mean": float(scores.mean()) if n > 0 else float("nan"),
+        "score_std": float(scores.std()) if n > 0 else float("nan"),
+        "estimated_empirical_coverage": float((scores <= q).mean()) if n > 0 else float("nan"),
+    }
+    if args.dump_scores:
+        payload["scores"] = scores.tolist()
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
 

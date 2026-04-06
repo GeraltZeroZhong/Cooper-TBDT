@@ -1,13 +1,25 @@
+"""Pipeline step: preprocess structures into ESM+PCA node features.
+
+How to use:
+  # 1) fit PCA on a structure directory
+  python -m evopoint_da.pipeline.preprocess_esm --data_dir data/raw_af2 --output_dir data/preprocessed_af2 --model_name /path/esm.pt --fit_pca
+
+  # 2) run embedding extraction using fitted PCA
+  python -m evopoint_da.pipeline.preprocess_esm --data_dir data/raw_af2 --output_dir data/preprocessed_af2 --model_name /path/esm.pt
+
+Purpose:
+- Produce reusable residue-level features from raw structures.
+- Can be used independently, or through the root `main.py` pipeline orchestrator.
+"""
+
 import argparse
 import glob
 import os
-import sys
 
 import numpy as np
 import torch
 from tqdm import tqdm
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "../src"))
 from evopoint_da.data.components import ESMFeatureExtractor, PCAReducer, StructureParser
 
 

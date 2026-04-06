@@ -1,18 +1,24 @@
+"""Pipeline final step: conformal-safe prediction + FASPR/OpenMM relaxation.
+
+How to use:
+  python -m evopoint_da.pipeline.run_faspr_openmm_relax --pdb_file <input.pdb> --feature_pt <graph.pt> --ckpt_path <model.ckpt> --conformal_stats artifacts/conformal_stats.json
+
+Purpose:
+- Runs conformal-guarded displacement prediction, then optional FASPR + OpenMM relaxation.
+- Serves deployment/post-processing workflows and can be chained by root `main.py`.
+"""
+
 import argparse
 import json
-import os
 import subprocess
 import sys
-from pathlib import Path
 from typing import Iterable
+from pathlib import Path
 
 import numpy as np
 import torch
 from Bio.PDB import PDBIO, PDBParser
 from torch_geometric.data import Data
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.append(str(REPO_ROOT / "src"))
 
 from evopoint_da.data.components import StructureParser, build_knn_edges
 from evopoint_da.models.module import EvoPointLitModule
@@ -69,7 +75,9 @@ def _load_qhat(path: str) -> float:
     return float(stats["qhat"])
 
 
-def _predict_displacement(args: argparse.Namespace) -> tuple[str, np.ndarray, np.ndarray, float, bool]:
+def _predict_displacement(
+    args: argparse.Namespace,
+) -> tuple[str, np.ndarray, np.ndarray, float, bool, int, int, dict[str, float]]:
     parser = StructureParser()
     parsed_chains = parser.parse_ca_structure(args.pdb_file)
     if not parsed_chains:
@@ -95,9 +103,13 @@ def _predict_displacement(args: argparse.Namespace) -> tuple[str, np.ndarray, np
 
     model = EvoPointLitModule.load_from_checkpoint(args.ckpt_path, map_location=args.device)
     model.eval().to(args.device)
+    expected_in = int(model.hparams.in_channels)
+    if x.size(1) != expected_in:
+        raise ValueError(f"Feature dim drift: input feature_dim={x.size(1)} but checkpoint expects in_channels={expected_in}")
 
     with torch.no_grad():
         delta = model.predict_displacement(data)
+    delta_norm = torch.norm(delta, dim=-1).detach().cpu().numpy()
 
     qhat = _load_qhat(args.conformal_stats)
     reject = qhat > args.reject_threshold
@@ -109,6 +121,14 @@ def _predict_displacement(args: argparse.Namespace) -> tuple[str, np.ndarray, np
         safe_centers.detach().cpu().numpy(),
         qhat,
         reject,
+        expected_in,
+        int(x.size(1)),
+        {
+            "num_nodes": int(delta_norm.shape[0]),
+            "pred_disp_mean": float(delta_norm.mean()) if delta_norm.size > 0 else 0.0,
+            "pred_disp_p90": float(np.percentile(delta_norm, 90)) if delta_norm.size > 0 else 0.0,
+            "pred_disp_max": float(delta_norm.max()) if delta_norm.size > 0 else 0.0,
+        },
     )
 
 
@@ -209,7 +229,7 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    chain_id, source_ca, safe_ca, qhat, reject = _predict_displacement(args)
+    chain_id, source_ca, safe_ca, qhat, reject, expected_in, observed_in, pred_summary = _predict_displacement(args)
 
     guardrailed_pdb = output_dir / "01_guardrailed_backbone.pdb"
     faspr_pdb = output_dir / "02_faspr_packed.pdb"
@@ -228,10 +248,13 @@ def main() -> None:
 
     report = {
         "chain_id": chain_id,
+        "feature_dim_observed": observed_in,
+        "feature_dim_expected": expected_in,
         "qhat": qhat,
         "reject_threshold": args.reject_threshold,
         "reject": reject,
         "safety_radius": qhat,
+        "prediction_summary": pred_summary,
         "artifacts": {
             "guardrailed_pdb": str(guardrailed_pdb),
             "faspr_pdb": str(faspr_pdb),

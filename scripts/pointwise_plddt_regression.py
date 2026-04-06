@@ -1,3 +1,14 @@
+"""Auxiliary analysis script (non-pipeline).
+
+How to use:
+  python scripts/pointwise_plddt_regression.py --ckpt checkpoints/<run>/best.ckpt --data_dir data/processed_graphs --split test
+
+Purpose:
+- Computes residue-level regression/correlation between pLDDT and coordinate error.
+- Outputs JSON/CSV/plots for model diagnostics and ablation analysis.
+- Not required for the end-to-end train/infer production path.
+"""
+
 import argparse
 import csv
 import json
