@@ -5,6 +5,7 @@ from datetime import datetime
 import hydra
 import pytorch_lightning as pl
 from omegaconf import DictConfig
+from omegaconf.base import ContainerMetadata
 from omegaconf.dictconfig import DictConfig as OmegaDictConfig
 from omegaconf.listconfig import ListConfig
 from pytorch_lightning.callbacks import ModelCheckpoint, RichProgressBar
@@ -20,7 +21,7 @@ def main(cfg: DictConfig):
     # this path for checkpoint restore in `trainer.test(..., ckpt_path=...)`.
     # Allowlist OmegaConf containers serialized in Lightning checkpoints so
     # safe weights-only loading can succeed.
-    add_safe_globals([ListConfig, OmegaDictConfig])
+    add_safe_globals([ListConfig, OmegaDictConfig, ContainerMetadata])
 
     seed_everything(cfg.seed, workers=True)
     root = hydra.utils.get_original_cwd()
