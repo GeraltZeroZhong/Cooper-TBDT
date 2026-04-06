@@ -460,12 +460,54 @@ def compute_structural_node_features(
     }
 
 def parse_pae_matrix(pae_path: Optional[str], n: int) -> np.ndarray:
-    if pae_path is None or not os.path.exists(pae_path): return np.zeros((n, n), dtype=np.float32)
-    if pae_path.lower().endswith(".npy"): pae = np.load(pae_path)
-    else:
-        with open(pae_path, "r", encoding="utf-8") as f: raw = json.load(f)
-        if isinstance(raw, dict) and "predicted_aligned_error" in raw: pae = np.asarray(raw["predicted_aligned_error"], dtype=np.float32)
-        else: pae = np.asarray(raw, dtype=np.float32)
+    def _zeros() -> np.ndarray:
+        return np.zeros((n, n), dtype=np.float32)
+
+    def _extract_matrix(raw_obj) -> Optional[np.ndarray]:
+        if isinstance(raw_obj, dict):
+            if "predicted_aligned_error" in raw_obj:
+                return np.asarray(raw_obj["predicted_aligned_error"], dtype=np.float32)
+            if "pae" in raw_obj:
+                return np.asarray(raw_obj["pae"], dtype=np.float32)
+            return None
+        if isinstance(raw_obj, list):
+            # AlphaFold JSON files are sometimes wrapped as:
+            # [{"predicted_aligned_error": [...], ...}]
+            if len(raw_obj) == 0:
+                return None
+            if isinstance(raw_obj[0], dict):
+                nested = _extract_matrix(raw_obj[0])
+                if nested is not None:
+                    return nested
+            return np.asarray(raw_obj, dtype=np.float32)
+        return np.asarray(raw_obj, dtype=np.float32)
+
+    if pae_path is None or not os.path.exists(pae_path):
+        return _zeros()
+
+    try:
+        if pae_path.lower().endswith(".npy"):
+            pae = np.asarray(np.load(pae_path), dtype=np.float32)
+        else:
+            with open(pae_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            extracted = _extract_matrix(raw)
+            if extracted is None:
+                return _zeros()
+            pae = np.asarray(extracted, dtype=np.float32)
+    except Exception:
+        return _zeros()
+
+    if pae.ndim != 2:
+        return _zeros()
+
+    # Ensure matrix is exactly n x n (truncate if larger, zero-pad if smaller).
+    h, w = int(pae.shape[0]), int(pae.shape[1])
+    if h != n or w != n:
+        out = _zeros()
+        hh, ww = min(n, h), min(n, w)
+        out[:hh, :ww] = pae[:hh, :ww]
+        return out
     return pae.astype(np.float32)
 
 def build_knn_edges(pos: torch.Tensor, k: int = 16, pae: Optional[np.ndarray] = None):
