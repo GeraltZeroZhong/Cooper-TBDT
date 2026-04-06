@@ -140,19 +140,19 @@ def main(cfg: DictConfig):
 
     if best_flex_ckpt:
         print(f"Running test with best-flex checkpoint: {best_flex_ckpt}")
-        trainer.test(model=model, datamodule=datamodule, ckpt_path=best_flex_ckpt)
+        trainer.test(model=model, datamodule=datamodule, ckpt_path=best_flex_ckpt, weights_only=False)
     else:
         print("Skipping best-flex checkpoint test: no best-flex checkpoint was saved.")
 
     if best_disp_1to5_ckpt:
         print(f"Running test with best-disp1to5 checkpoint: {best_disp_1to5_ckpt}")
-        trainer.test(model=model, datamodule=datamodule, ckpt_path=best_disp_1to5_ckpt)
+        trainer.test(model=model, datamodule=datamodule, ckpt_path=best_disp_1to5_ckpt, weights_only=False)
     else:
         print("Skipping best-disp1to5 checkpoint test: no best-disp1to5 checkpoint was saved.")
 
     if best_disp_1to2_ckpt:
         print(f"Running test with best-disp1to2 checkpoint: {best_disp_1to2_ckpt}")
-        trainer.test(model=model, datamodule=datamodule, ckpt_path=best_disp_1to2_ckpt)
+        trainer.test(model=model, datamodule=datamodule, ckpt_path=best_disp_1to2_ckpt, weights_only=False)
     else:
         print("Skipping best-disp1to2 checkpoint test: no best-disp1to2 checkpoint was saved.")
 
