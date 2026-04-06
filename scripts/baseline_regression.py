@@ -1,3 +1,14 @@
+"""Auxiliary baseline script (non-pipeline).
+
+How to use:
+  python scripts/baseline_regression.py --data_dir data/processed_graphs
+
+Purpose:
+- Provides a quick classical-ML sanity check using flattened node features and
+  displacement magnitudes.
+- This is for diagnostic comparison only, not part of the training/inference pipeline.
+"""
+
 import argparse
 import glob
 import os

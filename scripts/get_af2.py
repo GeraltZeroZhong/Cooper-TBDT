@@ -1,3 +1,17 @@
+"""Data acquisition helper (optional utility).
+
+How to use:
+  python scripts/get_af2.py
+
+Purpose:
+- Downloads AF2 PDB/PAE files by mapping local raw PDB IDs to UniProt IDs.
+- Generates/updates `pdb_uniprot_mapping.json`.
+
+Notes:
+- Network dependent and intended for dataset bootstrap/update phases.
+- Not required during model training once data is prepared.
+"""
+
 import os
 import glob
 import requests
