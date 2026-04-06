@@ -11,6 +11,12 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 from evopoint_da.data.components import StructureParser, build_knn_edges
 from evopoint_da.models.module import EvoPointLitModule
 
+AA_ORDER = [
+    "ALA", "CYS", "ASP", "GLU", "PHE", "GLY", "HIS", "ILE", "LYS", "LEU",
+    "MET", "ASN", "PRO", "GLN", "ARG", "SER", "THR", "VAL", "TRP", "TYR",
+]
+AA_TO_INDEX = {aa: i for i, aa in enumerate(AA_ORDER)}
+
 
 def _select_chain(chains: dict, chain_id: str | None):
     if chain_id is not None:
@@ -21,10 +27,56 @@ def _select_chain(chains: dict, chain_id: str | None):
     return best_id, chains[best_id]
 
 
+def _build_auto_features(parsed: dict, expected_in: int) -> torch.Tensor:
+    """Build residue-wise fallback features directly from input structure.
+
+    Feature blocks (before pad/trim):
+      - AA one-hot (20)
+      - pLDDT (1, normalized to [0,1] if values look like [0,100])
+      - normalized CA coordinates (3)
+    """
+    residue_names = parsed.get("residue_names", [])
+    plddts = np.asarray(parsed.get("plddts", []), dtype=np.float32)
+    coords = np.asarray(parsed.get("coords", []), dtype=np.float32)
+
+    n = int(coords.shape[0])
+    aa_onehot = np.zeros((n, len(AA_ORDER)), dtype=np.float32)
+    for i, resname in enumerate(residue_names[:n]):
+        idx = AA_TO_INDEX.get(str(resname).upper())
+        if idx is not None:
+            aa_onehot[i, idx] = 1.0
+
+    plddt_col = plddts[:n].reshape(n, 1) if plddts.size else np.zeros((n, 1), dtype=np.float32)
+    if plddt_col.max(initial=0.0) > 1.5:
+        plddt_col = plddt_col / 100.0
+
+    if n > 0:
+        coord_mean = coords.mean(axis=0, keepdims=True)
+        coord_std = coords.std(axis=0, keepdims=True) + 1e-6
+        coord_norm = (coords - coord_mean) / coord_std
+    else:
+        coord_norm = np.zeros((0, 3), dtype=np.float32)
+
+    base = np.concatenate([aa_onehot, plddt_col, coord_norm], axis=1)
+
+    if base.shape[1] < expected_in:
+        pad = np.zeros((n, expected_in - base.shape[1]), dtype=np.float32)
+        base = np.concatenate([base, pad], axis=1)
+    elif base.shape[1] > expected_in:
+        base = base[:, :expected_in]
+
+    return torch.from_numpy(base).float()
+
+
 def get_args():
     p = argparse.ArgumentParser(description="Predict Δr with conformal reject option.")
     p.add_argument("--pdb_file", required=True)
-    p.add_argument("--feature_pt", required=True, help="Prepared graph feature file with x tensor.")
+    p.add_argument(
+        "--feature_pt",
+        default=None,
+        help="Prepared graph feature file with x tensor. If omitted, features are auto-built from pdb_file.",
+    )
+    p.add_argument("--save_auto_feature_pt", default=None, help="Optional path to save auto-built feature payload (.pt).")
     p.add_argument("--ckpt_path", required=True)
     p.add_argument(
         "--conformal_stats",
@@ -46,9 +98,31 @@ def main():
         raise ValueError("Failed to parse input structure")
     selected_chain_id, parsed = _select_chain(parsed_chains, args.chain_id)
 
-    feat = torch.load(args.feature_pt, weights_only=False)
     pos = torch.tensor(parsed["coords"], dtype=torch.float32)
-    x = feat["x"].float()
+
+    # Torch 2.6 defaults torch.load(weights_only=True); Lightning checkpoints
+    # can include OmegaConf objects, so force full checkpoint loading.
+    model = EvoPointLitModule.load_from_checkpoint(args.ckpt_path, map_location=args.device, weights_only=False)
+    model.eval().to(args.device)
+    expected_in = int(model.hparams.in_channels)
+
+    if args.feature_pt:
+        feat = torch.load(args.feature_pt, weights_only=False)
+        x = feat["x"].float()
+    else:
+        x = _build_auto_features(parsed, expected_in)
+        print(f"[info] --feature_pt not provided; auto-built features from pdb with dim={x.size(1)}")
+        if args.save_auto_feature_pt:
+            payload = {
+                "x": x,
+                "pos": pos,
+                "plddt": torch.as_tensor(parsed.get("plddts", []), dtype=torch.float32).unsqueeze(1),
+                "residue_ids": parsed.get("residue_ids", []),
+                "sequence": parsed.get("sequence", ""),
+            }
+            torch.save(payload, args.save_auto_feature_pt)
+            print(f"[info] Auto-built features saved to: {args.save_auto_feature_pt}")
+
     if x.size(0) != len(pos):
         n = min(x.size(0), len(pos))
         print(
@@ -61,11 +135,6 @@ def main():
     edge_index, edge_attr = build_knn_edges(pos, k=args.k)
     data = Data(x=x, pos=pos, edge_index=edge_index, edge_attr=edge_attr).to(args.device)
 
-    # Torch 2.6 defaults torch.load(weights_only=True); Lightning checkpoints
-    # can include OmegaConf objects, so force full checkpoint loading.
-    model = EvoPointLitModule.load_from_checkpoint(args.ckpt_path, map_location=args.device, weights_only=False)
-    model.eval().to(args.device)
-    expected_in = int(model.hparams.in_channels)
     if x.size(1) != expected_in:
         raise ValueError(f"Feature dim drift: input feature_dim={x.size(1)} but checkpoint expects in_channels={expected_in}")
 
