@@ -378,6 +378,18 @@ class EvoPointLitModule(pl.LightningModule):
                 batch_size=batch_size,
             )
         if stage == "val":
+            disp_1to2_mask = (gt_disp_mag >= 1.0) & (gt_disp_mag < 2.0)
+            if disp_1to2_mask.any():
+                disp_1to2_mse = F.mse_loss(delta_pred_real[disp_1to2_mask], batch.y[disp_1to2_mask])
+                self.log(
+                    "val/disp_1to2_mse",
+                    disp_1to2_mse,
+                    on_step=False,
+                    on_epoch=True,
+                    prog_bar=True,
+                    batch_size=int(disp_1to2_mask.sum().item()),
+                )
+
             disp_1to5_mask = (gt_disp_mag >= self.hparams.disp_focus_min) & (gt_disp_mag < self.hparams.disp_focus_max)
             if disp_1to5_mask.any():
                 disp_1to5_mse = F.mse_loss(delta_pred_real[disp_1to5_mask], batch.y[disp_1to5_mask])
