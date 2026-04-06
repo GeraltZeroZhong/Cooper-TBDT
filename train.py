@@ -58,6 +58,15 @@ def main(cfg: DictConfig):
             save_last=False,
             auto_insert_metric_name=False,
         ),
+        ModelCheckpoint(
+            dirpath=ckpt_dir,
+            filename="best-disp1to2-{epoch:02d}-{val/disp_1to2_mse:.4f}",
+            monitor="val/disp_1to2_mse",
+            mode="min",
+            save_top_k=1,
+            save_last=False,
+            auto_insert_metric_name=False,
+        ),
         RichProgressBar(),
     ]
 
@@ -68,6 +77,7 @@ def main(cfg: DictConfig):
 
     best_flex_ckpt = callbacks[0].best_model_path
     best_disp_1to5_ckpt = callbacks[1].best_model_path
+    best_disp_1to2_ckpt = callbacks[2].best_model_path
 
     if best_flex_ckpt:
         print(f"Running test with best-flex checkpoint: {best_flex_ckpt}")
@@ -80,6 +90,12 @@ def main(cfg: DictConfig):
         trainer.test(model=model, datamodule=datamodule, ckpt_path=best_disp_1to5_ckpt)
     else:
         print("Skipping best-disp1to5 checkpoint test: no best-disp1to5 checkpoint was saved.")
+
+    if best_disp_1to2_ckpt:
+        print(f"Running test with best-disp1to2 checkpoint: {best_disp_1to2_ckpt}")
+        trainer.test(model=model, datamodule=datamodule, ckpt_path=best_disp_1to2_ckpt)
+    else:
+        print("Skipping best-disp1to2 checkpoint test: no best-disp1to2 checkpoint was saved.")
 
 
 if __name__ == "__main__":
