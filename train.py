@@ -1,6 +1,7 @@
 import os
 import sys
 import csv
+from typing import Any
 from datetime import datetime
 from pathlib import Path
 
@@ -74,7 +75,7 @@ def main(cfg: DictConfig):
     # this path for checkpoint restore in `trainer.test(..., ckpt_path=...)`.
     # Allowlist OmegaConf containers serialized in Lightning checkpoints so
     # safe weights-only loading can succeed.
-    add_safe_globals([ListConfig, OmegaDictConfig, ContainerMetadata])
+    add_safe_globals([Any, ListConfig, OmegaDictConfig, ContainerMetadata])
 
     seed_everything(cfg.seed, workers=True)
     root = hydra.utils.get_original_cwd()
