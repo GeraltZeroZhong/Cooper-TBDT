@@ -51,7 +51,9 @@ def main() -> None:
     dm.setup("fit")
     loader = dm.calib_dataloader()
 
-    model = EvoPointLitModule.load_from_checkpoint(args.ckpt, map_location=args.device)
+    # Torch 2.6 switched torch.load(weights_only) default to True. Our training
+    # checkpoints include OmegaConf objects, so disable weights-only loading here.
+    model = EvoPointLitModule.load_from_checkpoint(args.ckpt, map_location=args.device, weights_only=False)
     model.eval().to(args.device)
 
     scores = []

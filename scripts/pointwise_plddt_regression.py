@@ -325,7 +325,9 @@ def main():
     else:
         loader = dm.test_dataloader()
 
-    model = EvoPointLitModule.load_from_checkpoint(args.ckpt, map_location=args.device)
+    # Torch 2.6 defaults torch.load(weights_only=True); Lightning checkpoints
+    # can include OmegaConf objects, so force full checkpoint loading.
+    model = EvoPointLitModule.load_from_checkpoint(args.ckpt, map_location=args.device, weights_only=False)
     model.eval().to(args.device)
 
     plddt_all = []
