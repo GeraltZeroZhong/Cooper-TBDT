@@ -20,6 +20,11 @@ def _build_bin_ranges(edges: list[float], last_label: str = "gt") -> list[tuple[
     return ranges
 
 
+def _in_disp_range(values: torch.Tensor, low: float, high: float) -> torch.Tensor:
+    """Left-closed/right-open displacement range mask."""
+    return (values >= float(low)) & (values < float(high))
+
+
 class EvoPointLitModule(pl.LightningModule):
     def __init__(
         self,
@@ -128,12 +133,12 @@ class EvoPointLitModule(pl.LightningModule):
             self.log(f"test/baseline_disp_{suffix}_mse", baseline_mse)
             self.log(f"test/baseline_disp_{suffix}_rmsd", torch.sqrt(baseline_mse))
 
-        # Aggregated displacement bin: [1.0, 5.0)
+        # Aggregated displacement metric always uses [1.0, 5.0), independent of focus-training hyperparameters.
         agg_ranges = _build_bin_ranges(self.hparams.test_disp_bin_edges)
         agg_suffixes = [
             suffix
             for low, high, suffix in agg_ranges
-            if high is not None and low >= self.hparams.disp_focus_min and high <= self.hparams.disp_focus_max
+            if high is not None and low >= 1.0 and high <= 5.0
         ]
         agg_sse_sum = None
         agg_baseline_sse_sum = None
@@ -378,7 +383,7 @@ class EvoPointLitModule(pl.LightningModule):
                 batch_size=batch_size,
             )
         if stage == "val":
-            disp_1to2_mask = (gt_disp_mag >= 1.0) & (gt_disp_mag < 2.0)
+            disp_1to2_mask = _in_disp_range(gt_disp_mag, low=1.0, high=2.0)
             if disp_1to2_mask.any():
                 disp_1to2_mse = F.mse_loss(delta_pred_real[disp_1to2_mask], batch.y[disp_1to2_mask])
                 baseline_disp_1to2_mse = F.mse_loss(
@@ -405,7 +410,8 @@ class EvoPointLitModule(pl.LightningModule):
                     batch_size=int(disp_1to2_mask.sum().item()),
                 )
 
-            disp_1to5_mask = (gt_disp_mag >= self.hparams.disp_focus_min) & (gt_disp_mag < self.hparams.disp_focus_max)
+            # Keep this metric semantically stable: always [1.0, 5.0), independent of training focus range.
+            disp_1to5_mask = _in_disp_range(gt_disp_mag, low=1.0, high=5.0)
             if disp_1to5_mask.any():
                 disp_1to5_mse = F.mse_loss(delta_pred_real[disp_1to5_mask], batch.y[disp_1to5_mask])
                 self.log(
