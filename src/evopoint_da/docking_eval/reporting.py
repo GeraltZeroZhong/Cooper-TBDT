@@ -3,19 +3,21 @@ from __future__ import annotations
 from typing import Any
 
 
+def _flatten(prefix: str, payload: Any, rows: list[dict[str, Any]], section: str) -> None:
+    if isinstance(payload, dict):
+        for k, v in payload.items():
+            next_prefix = f"{prefix}.{k}" if prefix else str(k)
+            _flatten(next_prefix, v, rows, section)
+        return
+    if isinstance(payload, list):
+        return
+    rows.append({"section": section, "metric": prefix, "value": payload})
+
+
 def flatten_report_metrics(report: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for section, payload in report.items():
-        if isinstance(payload, dict):
-            for k, v in payload.items():
-                if isinstance(v, dict):
-                    for sk, sv in v.items():
-                        if not isinstance(sv, (dict, list)):
-                            rows.append({"section": section, "metric": f"{k}.{sk}", "value": sv})
-                elif not isinstance(v, list):
-                    rows.append({"section": section, "metric": k, "value": v})
-        elif not isinstance(payload, list):
-            rows.append({"section": "root", "metric": section, "value": payload})
+        _flatten("", payload, rows, section=section if isinstance(payload, dict) else "root")
     return rows
 
 
@@ -60,5 +62,31 @@ def to_markdown(report: dict[str, Any]) -> str:
             f"- Improvement rate (delta<0): {d['improvement_rate_percent']:.2f}% ({d['n_improved']}/{d['n_targets']})",
             f"- mean={d['mean_delta']:.4f}, median={d['median_delta']:.4f}, std={d['std_delta']:.4f}",
         ]
+
+    if "calibration_section" in report:
+        c = report["calibration_section"]
+        lines += [
+            "",
+            "## Calibration / Uncertainty (from eval_run.py)",
+            f"- qhat: {c.get('qhat')}",
+            f"- empirical coverage: {c.get('estimated_empirical_coverage')}",
+            f"- target coverage: {c.get('target_coverage')}",
+        ]
+        cal_quality = c.get("calibration_quality", {})
+        if isinstance(cal_quality, dict):
+            lines.append(
+                f"- ECE: {cal_quality.get('ece')}, ENCE: {cal_quality.get('ence')}, |coverage gap|: {cal_quality.get('coverage_gap_abs')}"
+            )
+        tail = c.get("tail_risk", {})
+        if isinstance(tail, dict) and tail:
+            lines.append(f"- Tail risk: {tail}")
+
+    if "cross_links" in report:
+        lines += ["", "## Cross-links", f"- {report['cross_links']}"]
+
+    if "traceability_meta" in report and report["traceability_meta"]:
+        lines += ["", "## Traceability"]
+        for k, v in report["traceability_meta"].items():
+            lines.append(f"- **{k}**: {v}")
 
     return "\n".join(lines)

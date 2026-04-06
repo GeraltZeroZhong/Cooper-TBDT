@@ -1,6 +1,7 @@
 import os
 import sys
 import csv
+import time
 from typing import Any
 from datetime import datetime
 from pathlib import Path
@@ -69,6 +70,76 @@ class ValidationMetricsCSVWriter(pl.Callback):
                 writer.writerow(row)
 
 
+class RuntimeCostCSVWriter(pl.Callback):
+    """Persist epoch-level runtime and estimated compute-cost metrics."""
+
+    def __init__(self, output_dir: str):
+        super().__init__()
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.csv_path = self.output_dir / "runtime_cost_metrics.csv"
+        self._epoch_start_time: float | None = None
+        self._fit_start_time: float | None = None
+        self._header_written = False
+
+    def _ensure_header(self):
+        if self._header_written and self.csv_path.exists():
+            return
+        if not self.csv_path.exists() or self.csv_path.stat().st_size == 0:
+            with self.csv_path.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=[
+                        "epoch",
+                        "epoch_seconds",
+                        "fit_elapsed_seconds",
+                        "estimated_gpu_hours",
+                        "global_step",
+                    ],
+                )
+                writer.writeheader()
+        self._header_written = True
+
+    def on_fit_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
+        now = time.perf_counter()
+        self._fit_start_time = now
+        self._epoch_start_time = now
+        self._ensure_header()
+
+    def on_train_epoch_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
+        self._epoch_start_time = time.perf_counter()
+
+    def on_train_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
+        if self._epoch_start_time is None:
+            return
+        now = time.perf_counter()
+        fit_elapsed = now - self._fit_start_time if self._fit_start_time is not None else float("nan")
+        use_gpu = bool(getattr(trainer, "num_devices", 0)) and str(getattr(trainer, "accelerator", "")).lower() in {
+            "cuda",
+            "gpu",
+        }
+        row = {
+            "epoch": trainer.current_epoch,
+            "epoch_seconds": now - self._epoch_start_time,
+            "fit_elapsed_seconds": fit_elapsed,
+            "estimated_gpu_hours": (fit_elapsed / 3600.0) if use_gpu else 0.0,
+            "global_step": trainer.global_step,
+        }
+        self._ensure_header()
+        with self.csv_path.open("a", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "epoch",
+                    "epoch_seconds",
+                    "fit_elapsed_seconds",
+                    "estimated_gpu_hours",
+                    "global_step",
+                ],
+            )
+            writer.writerow(row)
+
+
 @hydra.main(version_base="1.3", config_path="configs", config_name="train")
 def main(cfg: DictConfig):
     # PyTorch >=2.6 defaults torch.load(..., weights_only=True). Lightning uses
@@ -126,6 +197,7 @@ def main(cfg: DictConfig):
             auto_insert_metric_name=False,
         ),
         ValidationMetricsCSVWriter(output_dir=val_metrics_dir),
+        RuntimeCostCSVWriter(output_dir=val_metrics_dir),
         RichProgressBar(),
     ]
 
