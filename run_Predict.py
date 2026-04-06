@@ -61,7 +61,9 @@ def main():
     edge_index, edge_attr = build_knn_edges(pos, k=args.k)
     data = Data(x=x, pos=pos, edge_index=edge_index, edge_attr=edge_attr).to(args.device)
 
-    model = EvoPointLitModule.load_from_checkpoint(args.ckpt_path, map_location=args.device)
+    # Torch 2.6 defaults torch.load(weights_only=True); Lightning checkpoints
+    # can include OmegaConf objects, so force full checkpoint loading.
+    model = EvoPointLitModule.load_from_checkpoint(args.ckpt_path, map_location=args.device, weights_only=False)
     model.eval().to(args.device)
     expected_in = int(model.hparams.in_channels)
     if x.size(1) != expected_in:
