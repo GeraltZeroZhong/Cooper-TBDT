@@ -18,6 +18,46 @@ AA_ORDER = [
 AA_TO_INDEX = {aa: i for i, aa in enumerate(AA_ORDER)}
 
 
+def _format_bin_value(value: float) -> str:
+    if float(value).is_integer():
+        return str(int(value))
+    return str(value).replace(".", "p")
+
+
+def _build_bin_ranges(edges: list[float], last_label: str = "gt") -> list[tuple[float, float | None, str]]:
+    if len(edges) < 2:
+        raise ValueError("Bin edges must include at least 2 values.")
+    ranges: list[tuple[float, float | None, str]] = []
+    for low, high in zip(edges[:-1], edges[1:]):
+        ranges.append((float(low), float(high), f"{_format_bin_value(low)}to{_format_bin_value(high)}"))
+    ranges.append((float(edges[-1]), None, f"{last_label}{_format_bin_value(edges[-1])}"))
+    return ranges
+
+
+def _summarize_prediction_bins(pred_norm: np.ndarray, edges: list[float]) -> dict[str, dict]:
+    bin_stats: dict[str, dict] = {}
+    total = int(len(pred_norm))
+    for low, high, suffix in _build_bin_ranges(edges):
+        if high is None:
+            mask = pred_norm >= low
+            label = f">={low:g}"
+        else:
+            mask = (pred_norm >= low) & (pred_norm < high)
+            label = f"[{low:g}, {high:g})"
+        values = pred_norm[mask]
+        count = int(values.shape[0])
+        bin_stats[suffix] = {
+            "label": label,
+            "count": count,
+            "ratio": (count / total) if total > 0 else 0.0,
+            "mean_abs_dr": float(values.mean()) if count > 0 else None,
+            "median_abs_dr": float(np.median(values)) if count > 0 else None,
+            "p90_abs_dr": float(np.percentile(values, 90)) if count > 0 else None,
+            "max_abs_dr": float(values.max()) if count > 0 else None,
+        }
+    return bin_stats
+
+
 def _parse_residue_id(full_id: str) -> tuple[str, int, str]:
     """Split parser residue_id format '<chain>_<resseq><icode>'.
 
@@ -115,7 +155,17 @@ def _build_auto_features(parsed: dict, expected_in: int) -> torch.Tensor:
 
 
 
-def _build_prediction_report(args, selected_chain_id: str, qhat: float, reject: bool, expected_in: int, observed_in: int, pred_norm: np.ndarray, safe_center: np.ndarray) -> dict:
+def _build_prediction_report(
+    args,
+    selected_chain_id: str,
+    qhat: float,
+    reject: bool,
+    expected_in: int,
+    observed_in: int,
+    pred_norm: np.ndarray,
+    safe_center: np.ndarray,
+    disp_bin_edges: list[float],
+) -> dict:
     pred_stats = {
         "count": int(len(pred_norm)),
         "mean_abs_dr": float(pred_norm.mean()) if len(pred_norm) else 0.0,
@@ -123,6 +173,7 @@ def _build_prediction_report(args, selected_chain_id: str, qhat: float, reject: 
         "p90_abs_dr": float(np.percentile(pred_norm, 90)) if len(pred_norm) else 0.0,
         "max_abs_dr": float(pred_norm.max()) if len(pred_norm) else 0.0,
     }
+    pred_bin_stats = _summarize_prediction_bins(pred_norm, disp_bin_edges)
 
     report = {
         "input": {
@@ -145,6 +196,8 @@ def _build_prediction_report(args, selected_chain_id: str, qhat: float, reject: 
             "safety_radius": float(qhat),
         },
         "prediction_summary": pred_stats,
+        "prediction_bins": pred_bin_stats,
+        "prediction_bin_edges": [float(v) for v in disp_bin_edges],
         "preview": {
             "safe_center_first5": safe_center[:5].tolist(),
         },
@@ -185,6 +238,21 @@ def _print_prediction_report(report: dict) -> None:
     print(f"  median|Δr|: {ps['median_abs_dr']:.4f}")
     print(f"  p90|Δr|: {ps['p90_abs_dr']:.4f}")
     print(f"  max|Δr|: {ps['max_abs_dr']:.4f}")
+    print("[Prediction Bin Summary]")
+    print(f"  edges: {report['prediction_bin_edges']}")
+    for suffix, stats in report["prediction_bins"].items():
+        base = (
+            f"  {suffix:>8s} {stats['label']:>10s}: "
+            f"n={stats['count']}, ratio={stats['ratio']:.3f}"
+        )
+        if stats["count"] > 0:
+            print(
+                base
+                + f", mean={stats['mean_abs_dr']:.4f}, median={stats['median_abs_dr']:.4f}, "
+                + f"p90={stats['p90_abs_dr']:.4f}, max={stats['max_abs_dr']:.4f}"
+            )
+        else:
+            print(base)
     print("  first5_safe_centers:")
     print(np.array(report["preview"]["safe_center_first5"]))
 
@@ -267,6 +335,8 @@ def main():
     with torch.no_grad():
         delta = model.predict_displacement(data)
     pred_norm = torch.norm(delta, dim=-1).detach().cpu().numpy()
+    model_bin_edges = getattr(model.hparams, "test_disp_bin_edges", [0.0, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0])
+    disp_bin_edges = [float(v) for v in model_bin_edges]
 
     reject = qhat > args.reject_threshold
     if reject:
@@ -285,6 +355,7 @@ def main():
         observed_in=x.size(1),
         pred_norm=pred_norm,
         safe_center=safe_center,
+        disp_bin_edges=disp_bin_edges,
     )
     _print_prediction_report(report)
 
