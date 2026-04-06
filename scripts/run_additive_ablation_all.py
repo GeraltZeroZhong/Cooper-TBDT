@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run additive/constructive ablation experiments (A0 -> G1, with focus-only weighting).
+"""Run additive/constructive ablation experiments (A0 baseline + single-group restores).
 
 Each experiment starts from the fully-disabled baseline (A0) and restores exactly
 one logical loss group to its default value, including pLDDT-related terms.
@@ -88,7 +88,7 @@ def additive_matrix() -> list[ExperimentSpec]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run additive loss-group ablations (A0, D1, E1, F1, G1)")
+    parser = argparse.ArgumentParser(description="Run additive loss-group ablations (A0, B1, C1, D1, E1)")
     parser.add_argument("--seed", type=int, default=42, help="Seed used for all runs (default: 42)")
     parser.add_argument(
         "--python",
