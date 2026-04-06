@@ -3,6 +3,7 @@ import os
 from typing import Optional
 
 import pytorch_lightning as pl
+from omegaconf import OmegaConf
 from torch_geometric.loader import DataLoader
 
 from .dataset import EvoPointDataset, build_split_file_lists
@@ -55,7 +56,7 @@ class EvoPointDataModule(pl.LightningDataModule):
 
         manifest = {
             "split_seed": int(self.hparams.split_seed),
-            "split_ranges": self.hparams.split_ranges,
+            "split_ranges": OmegaConf.to_container(self.hparams.split_ranges, resolve=True),
             "counts": {k: len(self._split_files.get(k, [])) for k in self._split_files},
             "overlap_check": "passed",
         }
