@@ -1,6 +1,8 @@
 import os
 import sys
+import csv
 from datetime import datetime
+from pathlib import Path
 
 import hydra
 import pytorch_lightning as pl
@@ -13,6 +15,57 @@ from pytorch_lightning import seed_everything
 from torch.serialization import add_safe_globals
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+
+
+class ValidationMetricsCSVWriter(pl.Callback):
+    """Persist validation epoch metrics into a dedicated CSV file."""
+
+    def __init__(self, output_dir: str):
+        super().__init__()
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.csv_path = self.output_dir / "validation_metrics.csv"
+        self._fieldnames: list[str] | None = None
+
+    def _serialize(self, metric_value):
+        if hasattr(metric_value, "detach"):
+            metric_value = metric_value.detach()
+        if hasattr(metric_value, "cpu"):
+            metric_value = metric_value.cpu()
+        if hasattr(metric_value, "item"):
+            return metric_value.item()
+        return metric_value
+
+    def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
+        metrics = trainer.callback_metrics
+        row = {"epoch": trainer.current_epoch}
+        for key, value in metrics.items():
+            key_str = str(key)
+            if key_str.startswith("val/"):
+                row[key_str] = self._serialize(value)
+
+        if len(row) == 1:
+            return
+
+        if self._fieldnames is None:
+            existing_keys = []
+            if self.csv_path.exists():
+                with self.csv_path.open("r", encoding="utf-8", newline="") as f:
+                    reader = csv.DictReader(f)
+                    if reader.fieldnames:
+                        existing_keys = [name for name in reader.fieldnames if name != "epoch"]
+
+            merged_keys = sorted(set(existing_keys) | {k for k in row.keys() if k != "epoch"})
+            self._fieldnames = ["epoch", *merged_keys]
+            if not self.csv_path.exists() or self.csv_path.stat().st_size == 0:
+                with self.csv_path.open("w", encoding="utf-8", newline="") as f:
+                    writer = csv.DictWriter(f, fieldnames=self._fieldnames)
+                    writer.writeheader()
+
+        if self._fieldnames is not None:
+            with self.csv_path.open("a", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=self._fieldnames, extrasaction="ignore")
+                writer.writerow(row)
 
 
 @hydra.main(version_base="1.3", config_path="configs", config_name="train")
@@ -36,9 +89,12 @@ def main(cfg: DictConfig):
     study_name = str(cfg.get("study_name", "")).strip()
     if study_name:
         ckpt_dir = os.path.join(root, "checkpoints", study_name, run_time)
+        val_metrics_dir = os.path.join(root, "val_metrics", study_name, run_time)
     else:
         ckpt_dir = os.path.join(root, "checkpoints", run_time)
+        val_metrics_dir = os.path.join(root, "val_metrics", run_time)
     os.makedirs(ckpt_dir, exist_ok=True)
+    os.makedirs(val_metrics_dir, exist_ok=True)
 
     callbacks = [
         ModelCheckpoint(
@@ -68,6 +124,7 @@ def main(cfg: DictConfig):
             save_last=False,
             auto_insert_metric_name=False,
         ),
+        ValidationMetricsCSVWriter(output_dir=val_metrics_dir),
         RichProgressBar(),
     ]
 
