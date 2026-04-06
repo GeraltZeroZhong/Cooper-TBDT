@@ -23,7 +23,7 @@ def _build_bin_ranges(edges: list[float], last_label: str = "gt") -> list[tuple[
 class EvoPointLitModule(pl.LightningModule):
     def __init__(
         self,
-        in_channels: int = 130,
+        in_channels: int = 144,
         hidden_dim: int = 128,
         num_layers: int = 4,
         edge_dim: int = 2,
