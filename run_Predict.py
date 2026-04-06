@@ -152,7 +152,7 @@ def main():
         safe_radius = qhat
         print(f"REJECT: qhat={qhat:.4f} > threshold={args.reject_threshold:.4f}; keeping original structure")
     else:
-        safe_center = (pos + delta).detach().cpu().numpy()
+        safe_center = (pos.to(delta.device) + delta).detach().cpu().numpy()
         safe_radius = qhat
         print(f"ACCEPT: qhat={qhat:.4f}; returning predicted structure with conformal safety sphere")
 
