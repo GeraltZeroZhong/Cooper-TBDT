@@ -19,8 +19,15 @@ AA_TO_INDEX = {aa: i for i, aa in enumerate(AA_ORDER)}
 
 
 def _parse_residue_id(full_id: str) -> tuple[str, int, str]:
-    """Split parser residue_id format '<chain>_<resseq><icode>'."""
-    chain, raw = full_id.split("_", 1)
+    """Split parser residue_id format '<chain>_<resseq><icode>'.
+
+    Residue IDs are generated as f"{chain}_{resseq}{icode}"; mmCIF chain IDs
+    may contain underscores, so we split from the rightmost underscore to avoid
+    corrupting chain/residue boundaries.
+    """
+    if "_" not in full_id:
+        return full_id, 0, ""
+    chain, raw = full_id.rsplit("_", 1)
     idx = 0
     while idx < len(raw) and (raw[idx].isdigit() or (idx == 0 and raw[idx] == "-")):
         idx += 1
@@ -41,8 +48,9 @@ def _write_ca_pdb(output_path: str, residue_ids: list[str], residue_names: list[
             occ = 1.00
             bfac = 0.00
             x, y, z = float(xyz[0]), float(xyz[1]), float(xyz[2])
+            pdb_chain = (chain[:1] if chain else " ")
             line = (
-                f"ATOM  {serial:5d} {atom_name:>4s} {resn:>3s} {chain:1s}"
+                f"ATOM  {serial:5d} {atom_name:>4s} {resn:>3s} {pdb_chain:1s}"
                 f"{resseq:4d}{icode:1s}   {x:8.3f}{y:8.3f}{z:8.3f}"
                 f"{occ:6.2f}{bfac:6.2f}          {element:>2s}\n"
             )
@@ -105,6 +113,81 @@ def _build_auto_features(parsed: dict, expected_in: int) -> torch.Tensor:
     return torch.from_numpy(base).float()
 
 
+
+
+def _build_prediction_report(args, selected_chain_id: str, qhat: float, reject: bool, expected_in: int, observed_in: int, pred_norm: np.ndarray, safe_center: np.ndarray) -> dict:
+    pred_stats = {
+        "count": int(len(pred_norm)),
+        "mean_abs_dr": float(pred_norm.mean()) if len(pred_norm) else 0.0,
+        "median_abs_dr": float(np.median(pred_norm)) if len(pred_norm) else 0.0,
+        "p90_abs_dr": float(np.percentile(pred_norm, 90)) if len(pred_norm) else 0.0,
+        "max_abs_dr": float(pred_norm.max()) if len(pred_norm) else 0.0,
+    }
+
+    report = {
+        "input": {
+            "pdb_file": args.pdb_file,
+            "feature_pt": args.feature_pt,
+            "conformal_stats": args.conformal_stats,
+            "selected_chain": selected_chain_id,
+            "k": int(args.k),
+            "device": args.device,
+        },
+        "model": {
+            "ckpt_path": args.ckpt_path,
+            "feature_dim_observed": int(observed_in),
+            "feature_dim_expected": int(expected_in),
+        },
+        "conformal": {
+            "qhat": float(qhat),
+            "reject_threshold": float(args.reject_threshold),
+            "decision": "REJECT" if reject else "ACCEPT",
+            "safety_radius": float(qhat),
+        },
+        "prediction_summary": pred_stats,
+        "preview": {
+            "safe_center_first5": safe_center[:5].tolist(),
+        },
+        "artifacts": {
+            "output_pdb": args.output_pdb,
+            "save_auto_feature_pt": args.save_auto_feature_pt,
+        },
+    }
+    return report
+
+
+def _print_prediction_report(report: dict) -> None:
+    print("\n=== Prediction Report ===")
+    print("[Input]")
+    print(f"  pdb_file: {report['input']['pdb_file']}")
+    print(f"  selected_chain: {report['input']['selected_chain']}")
+    print(f"  k: {report['input']['k']}, device: {report['input']['device']}")
+
+    print("[Model]")
+    print(f"  ckpt_path: {report['model']['ckpt_path']}")
+    print(
+        "  feature_dim: "
+        f"observed={report['model']['feature_dim_observed']}, expected={report['model']['feature_dim_expected']}"
+    )
+
+    print("[Conformal]")
+    print(f"  decision: {report['conformal']['decision']}")
+    print(
+        f"  qhat={report['conformal']['qhat']:.4f}, "
+        f"threshold={report['conformal']['reject_threshold']:.4f}, "
+        f"safety_radius={report['conformal']['safety_radius']:.4f}"
+    )
+
+    print("[Prediction Summary]")
+    ps = report["prediction_summary"]
+    print(f"  nodes: {ps['count']}")
+    print(f"  mean|Δr|: {ps['mean_abs_dr']:.4f}")
+    print(f"  median|Δr|: {ps['median_abs_dr']:.4f}")
+    print(f"  p90|Δr|: {ps['p90_abs_dr']:.4f}")
+    print(f"  max|Δr|: {ps['max_abs_dr']:.4f}")
+    print("  first5_safe_centers:")
+    print(np.array(report["preview"]["safe_center_first5"]))
+
 def get_args():
     p = argparse.ArgumentParser(description="Predict Δr with conformal reject option.")
     p.add_argument("--pdb_file", required=True)
@@ -124,6 +207,7 @@ def get_args():
     p.add_argument("--k", type=int, default=16)
     p.add_argument("--chain_id", default=None, help="Optional chain ID to predict. Default: longest chain.")
     p.add_argument("--output_pdb", default=None, help="Optional output path for predicted CA-only PDB.")
+    p.add_argument("--report_json", default=None, help="Optional path to save a detailed prediction report JSON.")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return p.parse_args()
 
@@ -187,21 +271,28 @@ def main():
     reject = qhat > args.reject_threshold
     if reject:
         safe_center = pos.cpu().numpy()
-        safe_radius = qhat
         print(f"REJECT: qhat={qhat:.4f} > threshold={args.reject_threshold:.4f}; keeping original structure")
     else:
         safe_center = (pos.to(delta.device) + delta).detach().cpu().numpy()
-        safe_radius = qhat
         print(f"ACCEPT: qhat={qhat:.4f}; returning predicted structure with conformal safety sphere")
 
-    print(f"Selected chain: {selected_chain_id}")
-    print(f"Nodes predicted: {len(pred_norm)}")
-    print(f"Feature dim: {x.size(1)} (ckpt expects {expected_in})")
-    print(f"Mean |Δr_pred|: {pred_norm.mean():.4f}")
-    print(f"P90 |Δr_pred|: {np.percentile(pred_norm, 90):.4f}")
-    print(f"Max |Δr_pred|: {pred_norm.max():.4f}")
-    print(f"Safety sphere radius (qhat): {safe_radius:.4f}")
-    print(f"First 5 centers:\n{safe_center[:5]}")
+    report = _build_prediction_report(
+        args=args,
+        selected_chain_id=selected_chain_id,
+        qhat=qhat,
+        reject=reject,
+        expected_in=expected_in,
+        observed_in=x.size(1),
+        pred_norm=pred_norm,
+        safe_center=safe_center,
+    )
+    _print_prediction_report(report)
+
+    if args.report_json:
+        os.makedirs(os.path.dirname(args.report_json) or ".", exist_ok=True)
+        with open(args.report_json, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
+        print(f"Detailed report JSON written to: {args.report_json}")
 
     if args.output_pdb:
         residue_ids = list(parsed.get("residue_ids", []))[: len(safe_center)]
