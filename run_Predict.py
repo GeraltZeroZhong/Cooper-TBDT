@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -10,6 +11,11 @@ from torch_geometric.data import Data
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 from evopoint_da.data.components import StructureParser, build_knn_edges
 from evopoint_da.models.module import EvoPointLitModule
+from evopoint_da.pipeline.run_faspr_openmm_relax import (
+    _run_faspr,
+    _run_openmm_restrained_minimization,
+    _write_guardrailed_pdb,
+)
 
 AA_ORDER = [
     "ALA", "CYS", "ASP", "GLU", "PHE", "GLY", "HIS", "ILE", "LYS", "LEU",
@@ -256,6 +262,42 @@ def _print_prediction_report(report: dict) -> None:
     print("  first5_safe_centers:")
     print(np.array(report["preview"]["safe_center_first5"]))
 
+
+def _run_relax_after_prediction(
+    args,
+    selected_chain_id: str,
+    source_center: np.ndarray,
+    safe_center: np.ndarray,
+) -> dict[str, str]:
+    output_dir = Path(args.relax_output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    guardrailed_pdb = output_dir / "01_guardrailed_backbone.pdb"
+    faspr_pdb = output_dir / "02_faspr_packed.pdb"
+    minimized_pdb = output_dir / "03_openmm_minimized.pdb"
+
+    _write_guardrailed_pdb(args.pdb_file, selected_chain_id, source_center, safe_center, str(guardrailed_pdb))
+    _run_faspr(args.faspr_bin, str(guardrailed_pdb), str(faspr_pdb), args.faspr_extra_args)
+    _run_openmm_restrained_minimization(
+        str(faspr_pdb),
+        str(minimized_pdb),
+        restraint_k=args.restraint_k,
+        max_iterations=args.max_iterations,
+        restrain_selection=args.restrain_selection,
+    )
+
+    artifacts = {
+        "guardrailed_pdb": str(guardrailed_pdb),
+        "faspr_pdb": str(faspr_pdb),
+        "minimized_pdb": str(minimized_pdb),
+    }
+    print("[relax] Finished FASPR + OpenMM relaxation.")
+    print(f"[relax] Guardrailed backbone: {artifacts['guardrailed_pdb']}")
+    print(f"[relax] FASPR packed:         {artifacts['faspr_pdb']}")
+    print(f"[relax] OpenMM minimized:     {artifacts['minimized_pdb']}")
+    return artifacts
+
+
 def get_args():
     p = argparse.ArgumentParser(description="Predict Δr with conformal reject option.")
     p.add_argument("--pdb_file", required=True)
@@ -277,6 +319,28 @@ def get_args():
     p.add_argument("--output_pdb", default=None, help="Optional output path for predicted CA-only PDB.")
     p.add_argument("--report_json", default=None, help="Optional path to save a detailed prediction report JSON.")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument(
+        "--run_relax",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run FASPR + OpenMM relax right after prediction (default: enabled, disable via --no-run_relax).",
+    )
+    p.add_argument("--relax_output_dir", default="artifacts/relaxation", help="Output dir for relax artifacts.")
+    p.add_argument("--faspr_bin", default="FASPR", help="Path to FASPR executable.")
+    p.add_argument(
+        "--faspr_extra_args",
+        nargs="*",
+        default=[],
+        help="Extra args passed directly to FASPR, e.g. --faspr_extra_args -r 0",
+    )
+    p.add_argument("--restraint_k", type=float, default=1000.0, help="kJ/(mol*nm^2) for OpenMM restraints.")
+    p.add_argument("--max_iterations", type=int, default=500, help="OpenMM minimization max iterations.")
+    p.add_argument(
+        "--restrain_selection",
+        choices=["heavy", "ca"],
+        default="heavy",
+        help="Apply restraints to all heavy atoms or C-alpha atoms only.",
+    )
     return p.parse_args()
 
 
@@ -370,6 +434,19 @@ def main():
         residue_names = list(parsed.get("residue_names", []))[: len(safe_center)]
         _write_ca_pdb(args.output_pdb, residue_ids, residue_names, safe_center)
         print(f"Predicted PDB written to: {args.output_pdb}")
+
+    if args.run_relax:
+        relax_artifacts = _run_relax_after_prediction(
+            args=args,
+            selected_chain_id=selected_chain_id,
+            source_center=pos.detach().cpu().numpy(),
+            safe_center=safe_center,
+        )
+        report["artifacts"]["relax"] = relax_artifacts
+        if args.report_json:
+            with open(args.report_json, "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2)
+            print(f"Detailed report JSON updated with relax artifacts: {args.report_json}")
 
 
 if __name__ == "__main__":
