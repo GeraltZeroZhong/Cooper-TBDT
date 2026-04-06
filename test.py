@@ -27,7 +27,18 @@ def main(cfg: DictConfig):
     )
 
     ckpt_path = cfg.get("ckpt_path", None)
-    trainer.test(model=model, datamodule=datamodule, ckpt_path=ckpt_path)
+    # NOTE:
+    # PyTorch 2.6 changed `torch.load(..., weights_only=...)` default from
+    # False to True. Lightning forwards this through `trainer.test`.
+    # Older checkpoints that include OmegaConf objects in metadata can fail to
+    # unpickle with the strict safe loader unless we explicitly disable
+    # `weights_only`.
+    trainer.test(
+        model=model,
+        datamodule=datamodule,
+        ckpt_path=ckpt_path,
+        weights_only=False,
+    )
 
 
 if __name__ == "__main__":
