@@ -1,6 +1,6 @@
 _target_: evopoint_da.data.datamodule.EvoPointDataModule
 data_dir: ${paths.data_dir}/processed_graphs
-batch_size: 4
+batch_size: 8
 num_workers: 0
 calib_batch_size: 1
 split_seed: 42
