@@ -55,6 +55,8 @@ class DockingPipelineConfig:
     ligand_seed: int = 42
     bootstrap_iter: int = 2000
     bootstrap_seed: int = 42
+    redocking_reference_label: str = "true_holo"
+    redocking_gate_topn: int = 5
     reuse: bool = False
     skip_failed: bool = False
     dry_run: bool = False
@@ -369,6 +371,58 @@ def _pose_rows_for_metrics(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
     return [{k: str(v) for k, v in row.items()} for row in rows if str(row.get("rmsd", "")).strip()]
 
 
+def _redocking_sanity_gate(
+    pose_rows: list[dict[str, Any]],
+    *,
+    reference_label: str,
+    threshold: float,
+    gate_topn: int,
+) -> dict[str, Any]:
+    rows = [row for row in pose_rows if row.get("structure") == reference_label]
+    target_ids = sorted({str(row.get("target_id", "")) for row in rows if str(row.get("target_id", "")).strip()})
+    passed: list[str] = []
+    failed: list[str] = []
+    first_hit_rank: dict[str, int | None] = {}
+    top1_rmsd: dict[str, float | None] = {}
+
+    for target_id in target_ids:
+        target_rows = sorted(
+            [row for row in rows if str(row.get("target_id", "")) == target_id],
+            key=lambda row: int(float(row.get("rank", 10**9) or 10**9)),
+        )
+        hit_rank = None
+        top1_value = None
+        for row in target_rows:
+            rank = int(float(row.get("rank", 10**9) or 10**9))
+            rmsd = _float_or_none(row.get("rmsd"))
+            if rank == 1:
+                top1_value = rmsd
+            if rmsd is not None and rank <= gate_topn and rmsd < threshold and hit_rank is None:
+                hit_rank = rank
+        first_hit_rank[target_id] = hit_rank
+        top1_rmsd[target_id] = top1_value
+        if hit_rank is None:
+            failed.append(target_id)
+        else:
+            passed.append(target_id)
+
+    n_targets = len(target_ids)
+    return {
+        "reference_label": reference_label,
+        "rmsd_threshold": float(threshold),
+        "gate_topn": int(gate_topn),
+        "n_targets": n_targets,
+        "n_passed": len(passed),
+        "n_failed": len(failed),
+        "pass_rate": (len(passed) / n_targets) if n_targets else float("nan"),
+        "passed_targets": passed,
+        "failed_targets": failed,
+        "first_hit_rank": first_hit_rank,
+        "top1_rmsd": top1_rmsd,
+        "publishable_pose_claims": bool(n_targets > 0 and not failed),
+    }
+
+
 def build_pipeline_summary(
     pose_rows: list[dict[str, Any]],
     score_rows: list[dict[str, Any]],
@@ -385,7 +439,11 @@ def build_pipeline_summary(
             "topn_levels": topn_levels,
             "score_direction": "lower_better",
             "formula": "delta_score = score_holoshift - score_af2",
-            "interpretation": "lower Vina score is better; delta < 0 means HoloShift improved over AF2",
+            "primary_endpoint": "ligand heavy-atom pose RMSD success against crystal reference coordinates",
+            "vina_score_role": "auxiliary only; lower Vina score is not treated as pose improvement across receptor conformations",
+            "interpretation": "delta_score < 0 means lower Vina score for HoloShift, not necessarily a better pose",
+            "redocking_reference_label": cfg.redocking_reference_label,
+            "redocking_gate_topn": cfg.redocking_gate_topn,
             "structures": [asdict(structure) for structure in structures],
         },
         "by_structure": {},
@@ -452,6 +510,29 @@ def build_pipeline_summary(
             "n_target_metrics_rows": len(target_metrics),
         }
 
+    labels = {structure.label for structure in structures}
+    if cfg.redocking_reference_label in labels:
+        redocking = _redocking_sanity_gate(
+            pose_rows,
+            reference_label=cfg.redocking_reference_label,
+            threshold=cfg.rmsd_threshold,
+            gate_topn=cfg.redocking_gate_topn,
+        )
+        summary["redocking_sanity"] = redocking
+        summary["publishability"] = {
+            "pose_power_claims_allowed": bool(redocking["publishable_pose_claims"] and not failures),
+            "reason": (
+                "true holo redocking passed"
+                if redocking["publishable_pose_claims"]
+                else f"{cfg.redocking_reference_label} redocking failed for {redocking['n_failed']} target(s)"
+            ),
+        }
+    else:
+        summary["publishability"] = {
+            "pose_power_claims_allowed": False,
+            "reason": f"missing redocking reference structure label {cfg.redocking_reference_label!r}",
+        }
+
     score_rows_str = [{k: str(v) for k, v in row.items()} for row in score_rows]
     if score_rows_str and any("score_holoshift" in row and "score_af2" in row for row in score_rows_str):
         delta_summary, hs_values, af2_values, delta_values = summarize_delta(
@@ -512,10 +593,23 @@ def pipeline_summary_to_markdown(summary: dict[str, Any]) -> str:
         lines += [
             "",
             "## Delta Vina Score",
+            "- Vina score is auxiliary only and is not interpreted as pose correctness across receptor conformations.",
             f"- Improvement rate (delta<0): {delta['improvement_rate_percent']:.2f}% "
             f"({delta['n_improved']}/{delta['n_targets']})",
             f"- mean delta: {delta['mean_delta']:.4f}",
         ]
+
+    if "redocking_sanity" in summary:
+        gate = summary["redocking_sanity"]
+        lines += [
+            "",
+            "## Redocking Sanity Gate",
+            f"- reference structure: {gate['reference_label']}",
+            f"- Top-{gate['gate_topn']} pass rate: {gate['pass_rate']:.2%} ({gate['n_passed']}/{gate['n_targets']})",
+            f"- publishable pose-power claims: {gate['publishable_pose_claims']}",
+        ]
+        if gate["failed_targets"]:
+            lines.append(f"- failed targets: {', '.join(gate['failed_targets'])}")
 
     failures = summary.get("failures", [])
     if failures:

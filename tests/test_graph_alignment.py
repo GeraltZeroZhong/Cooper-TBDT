@@ -15,6 +15,8 @@ from evopoint_da.data.graph import (
     build_knn_edges,
     gvp_edge_scalar_dim,
     parse_pae_matrix,
+    parse_pae_matrix_for_indices,
+    parse_pae_matrix_for_residue_ids,
 )
 
 
@@ -61,6 +63,28 @@ class GraphAndAlignmentTests(unittest.TestCase):
             bad.write_text(json.dumps({"not_pae": []}), encoding="utf-8")
             with self.assertRaises(ValueError):
                 parse_pae_matrix(str(bad), 3, strict=True)
+
+    def test_parse_pae_matrix_for_residue_ids_subsets_full_af2_indices(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "pae.json"
+            full = np.arange(25, dtype=np.float32).reshape(5, 5)
+            path.write_text(json.dumps({"predicted_aligned_error": full.tolist()}), encoding="utf-8")
+
+            parsed = parse_pae_matrix_for_residue_ids(str(path), ["A_2", "A_4"])
+
+            expected = full[np.ix_([1, 3], [1, 3])]
+            np.testing.assert_allclose(parsed, expected)
+
+    def test_parse_pae_matrix_for_indices_subsets_zero_based_indices(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "pae.json"
+            full = np.arange(16, dtype=np.float32).reshape(4, 4)
+            path.write_text(json.dumps({"predicted_aligned_error": full.tolist()}), encoding="utf-8")
+
+            parsed = parse_pae_matrix_for_indices(str(path), [0, 3])
+
+            expected = full[np.ix_([0, 3], [0, 3])]
+            np.testing.assert_allclose(parsed, expected)
 
     def test_gvp_feature_helpers_build_expected_shapes(self) -> None:
         pos = torch.tensor(
