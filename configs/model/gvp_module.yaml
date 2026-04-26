@@ -1,5 +1,6 @@
 _target_: evopoint_da.models.module.EvoPointLitModule
 backbone_type: gvp
+loss_gates_enabled: true
 in_channels: 144
 hidden_dim: 128
 num_layers: 4
