@@ -118,6 +118,82 @@ def _build_auto_features(parsed: dict, expected_in: int) -> torch.Tensor:
     return torch.from_numpy(base).float()
 
 
+def _load_prediction_features(
+    args: argparse.Namespace,
+    parsed: dict,
+    pos: torch.Tensor,
+    expected_in: int,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    if args.feature_pt:
+        feat = torch.load(args.feature_pt, weights_only=True)
+        x = feat["x"].float()
+        edge_index = feat.get("edge_index", None)
+        edge_attr = feat.get("edge_attr", None)
+        if edge_index is not None:
+            edge_index = edge_index.long()
+        if edge_attr is not None:
+            edge_attr = edge_attr.float()
+        return x, edge_index, edge_attr
+
+    if not getattr(args, "allow_fallback_features", False):
+        raise ValueError(
+            "--feature_pt is required for normal inference. The automatic fallback "
+            "features are AA one-hot + pLDDT + normalized coordinates and do not "
+            "match the training feature pipeline. Pass a graph feature .pt built "
+            "with the same ESM/PCA + structural-feature pipeline used for training, "
+            "or add --allow_fallback_features for debugging only."
+        )
+
+    x = _build_auto_features(parsed, expected_in)
+    print(
+        "[warning] --allow_fallback_features enabled; using debug-only fallback "
+        f"features with dim={x.size(1)}. These do not match training features.",
+        file=sys.stderr,
+    )
+    save_auto_feature_pt = getattr(args, "save_auto_feature_pt", None)
+    if save_auto_feature_pt:
+        payload = {
+            "x": x,
+            "pos": pos,
+            "plddt": torch.as_tensor(parsed.get("plddts", []), dtype=torch.float32).unsqueeze(1),
+            "residue_ids": parsed.get("residue_ids", []),
+            "sequence": parsed.get("sequence", ""),
+        }
+        torch.save(payload, save_auto_feature_pt)
+        print(f"[info] Auto-built fallback features saved to: {save_auto_feature_pt}")
+    return x, None, None
+
+
+def _feature_edges_for_node_count(
+    edge_index: torch.Tensor | None,
+    edge_attr: torch.Tensor | None,
+    n: int,
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    if edge_index is None or edge_attr is None:
+        return None, None
+    if edge_index.dim() != 2 or edge_index.size(0) != 2:
+        raise ValueError(f"edge_index must have shape (2, E), got {tuple(edge_index.shape)}")
+    if edge_attr.dim() != 2 or edge_attr.size(0) != edge_index.size(1):
+        raise ValueError(
+            "edge_attr must have shape (E, edge_dim) matching edge_index; "
+            f"got edge_attr={tuple(edge_attr.shape)}, edge_index={tuple(edge_index.shape)}"
+        )
+
+    if edge_index.numel() == 0:
+        return edge_index.contiguous(), edge_attr.contiguous()
+
+    valid = (
+        (edge_index[0] >= 0)
+        & (edge_index[1] >= 0)
+        & (edge_index[0] < n)
+        & (edge_index[1] < n)
+    )
+    if not bool(valid.all()):
+        edge_index = edge_index[:, valid]
+        edge_attr = edge_attr[valid]
+    return edge_index.contiguous(), edge_attr.contiguous()
+
+
 
 
 def _build_prediction_report(
@@ -144,6 +220,7 @@ def _build_prediction_report(
         "input": {
             "pdb_file": args.pdb_file,
             "feature_pt": args.feature_pt,
+            "allow_fallback_features": bool(getattr(args, "allow_fallback_features", False)),
             "conformal_stats": args.conformal_stats,
             "selected_chain": selected_chain_id,
             "k": int(args.k),
@@ -263,9 +340,21 @@ def get_args():
     p.add_argument(
         "--feature_pt",
         default=None,
-        help="Prepared graph feature file with x tensor. If omitted, features are auto-built from pdb_file.",
+        help=(
+            "Prepared graph feature file with training-compatible x tensor. "
+            "Required unless --allow_fallback_features is set for debugging."
+        ),
     )
-    p.add_argument("--save_auto_feature_pt", default=None, help="Optional path to save auto-built feature payload (.pt).")
+    p.add_argument(
+        "--allow_fallback_features",
+        action="store_true",
+        help="Allow debug-only AA/pLDDT/coordinate fallback features when --feature_pt is omitted.",
+    )
+    p.add_argument(
+        "--save_auto_feature_pt",
+        default=None,
+        help="Optional path to save debug-only auto-built fallback features (.pt).",
+    )
     p.add_argument("--ckpt_path", required=True)
     p.add_argument(
         "--conformal_stats",
@@ -319,22 +408,9 @@ def main():
     model.eval().to(args.device)
     expected_in = int(model.hparams.in_channels)
 
-    if args.feature_pt:
-        feat = torch.load(args.feature_pt, weights_only=True)
-        x = feat["x"].float()
-    else:
-        x = _build_auto_features(parsed, expected_in)
-        print(f"[info] --feature_pt not provided; auto-built features from pdb with dim={x.size(1)}")
-        if args.save_auto_feature_pt:
-            payload = {
-                "x": x,
-                "pos": pos,
-                "plddt": torch.as_tensor(parsed.get("plddts", []), dtype=torch.float32).unsqueeze(1),
-                "residue_ids": parsed.get("residue_ids", []),
-                "sequence": parsed.get("sequence", ""),
-            }
-            torch.save(payload, args.save_auto_feature_pt)
-            print(f"[info] Auto-built features saved to: {args.save_auto_feature_pt}")
+    feature_edge_index: torch.Tensor | None
+    feature_edge_attr: torch.Tensor | None
+    x, feature_edge_index, feature_edge_attr = _load_prediction_features(args, parsed, pos, expected_in)
 
     if x.size(0) != len(pos):
         n = min(x.size(0), len(pos))
@@ -345,7 +421,9 @@ def main():
         x = x[:n]
         pos = pos[:n]
 
-    edge_index, edge_attr = build_knn_edges(pos, k=args.k)
+    edge_index, edge_attr = _feature_edges_for_node_count(feature_edge_index, feature_edge_attr, len(pos))
+    if edge_index is None or edge_attr is None:
+        edge_index, edge_attr = build_knn_edges(pos, k=args.k)
     data = Data(x=x, pos=pos, edge_index=edge_index, edge_attr=edge_attr).to(args.device)
 
     if x.size(1) != expected_in:
