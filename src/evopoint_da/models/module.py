@@ -49,7 +49,7 @@ class EvoPointLitModule(pl.LightningModule):
         lambda_high_plddt_l2: float = 0.1,
         lambda_low_plddt_l2: float = 0.5,
         lr_warmup_epochs: int = 10,
-        inference_disp_multiplier: float = 2.0,
+        inference_disp_multiplier: float = 1.0,
         coord_init_gain: float = 0.001,
         eps: float = 1e-8,
         cosine_eps: float = 1e-6,
@@ -161,10 +161,16 @@ class EvoPointLitModule(pl.LightningModule):
         _, pos_updated = self.backbone(batch.x, batch.pos, batch.edge_index, batch.edge_attr)
         return pos_updated - batch.pos
 
-    def predict_displacement(self, batch):
-        """Return final displacement in real coordinate space for inference/export usage."""
+    def predict_displacement(self, batch, *, apply_inference_multiplier: bool = False):
+        """Return displacement in the same real-coordinate scale used by validation.
+
+        ``apply_inference_multiplier`` is kept as an explicit opt-in for legacy
+        post-hoc experiments; default inference/test behavior should match the
+        validation metrics used for checkpoint selection.
+        """
         delta_pred = self.forward(batch)
-        return delta_pred * self.coord_scale * self.hparams.inference_disp_multiplier
+        multiplier = self.hparams.inference_disp_multiplier if apply_inference_multiplier else 1.0
+        return delta_pred * self.coord_scale * multiplier
 
     def _clash_penalty(self, pos_pred: torch.Tensor, edge_index: torch.Tensor):
         if edge_index.numel() == 0:
