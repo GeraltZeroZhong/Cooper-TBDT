@@ -40,6 +40,13 @@ class EvoPointLitModule(pl.LightningModule):
         target_weight_beta: float = 0.0,
         target_weight_ref: float = 1.0,
         target_weight_max: float = 4.0,
+        selection_disp_1to2_weight: float = 0.7,
+        selection_disp_1to5_weight: float = 0.3,
+        main_loss_min_disp: float = 0.0,
+        main_loss_max_disp: float = -1.0,
+        main_loss_outside_weight: float = 1.0,
+        main_loss_1to2_weight: float = 1.0,
+        main_loss_type: str = "smooth_l1",
         lr: float = 1e-4,
         weight_decay: float = 1e-5,
         lambda_clash: float = 0.1,
@@ -338,6 +345,30 @@ class EvoPointLitModule(pl.LightningModule):
         target_norm = batch.y / self.coord_scale
         target_mag_real = torch.norm(batch.y, dim=-1)
         mse_weights = torch.ones_like(target_mag_real)
+        if (
+            self.hparams.main_loss_max_disp > self.hparams.main_loss_min_disp
+            or self.hparams.main_loss_outside_weight != 1.0
+            or self.hparams.main_loss_1to2_weight != 1.0
+        ):
+            in_main_band = (
+                (target_mag_real >= float(self.hparams.main_loss_min_disp))
+                if self.hparams.main_loss_max_disp <= self.hparams.main_loss_min_disp
+                else (
+                    (target_mag_real >= float(self.hparams.main_loss_min_disp))
+                    & (target_mag_real < float(self.hparams.main_loss_max_disp))
+                )
+            )
+            mse_weights = torch.where(
+                in_main_band,
+                mse_weights,
+                mse_weights * float(self.hparams.main_loss_outside_weight),
+            )
+            in_1to2 = (target_mag_real >= 1.0) & (target_mag_real < 2.0)
+            mse_weights = torch.where(
+                in_1to2,
+                mse_weights * float(self.hparams.main_loss_1to2_weight),
+                mse_weights,
+            )
         target_weights = torch.ones_like(target_mag_real)
         if self.hparams.target_weight_beta > 0.0:
             target_scale = target_mag_real / max(float(self.hparams.target_weight_ref), self.hparams.eps)
@@ -359,7 +390,10 @@ class EvoPointLitModule(pl.LightningModule):
 
         mse_weights = mse_weights / (mse_weights.mean().detach() + self.hparams.eps)
 
-        loss_node_mse = F.smooth_l1_loss(delta_pred, target_norm, reduction='none').mean(dim=-1)
+        if str(self.hparams.main_loss_type).lower() == "mse":
+            loss_node_mse = F.mse_loss(delta_pred, target_norm, reduction="none").mean(dim=-1)
+        else:
+            loss_node_mse = F.smooth_l1_loss(delta_pred, target_norm, reduction="none").mean(dim=-1)
         loss_mse = (loss_node_mse * mse_weights).mean()
         mask_focus = (
             (target_mag_real >= self.hparams.direction_mask_threshold)
@@ -429,6 +463,8 @@ class EvoPointLitModule(pl.LightningModule):
         self.log(f"{stage}/weights/target_weight_beta", float(self.hparams.target_weight_beta), batch_size=batch_size)
         self.log(f"{stage}/weights/target_weight_mean", target_weights.mean(), batch_size=batch_size)
         self.log(f"{stage}/weights/target_weight_std", target_weights.std(unbiased=False), batch_size=batch_size)
+        self.log(f"{stage}/weights/main_loss_outside_weight", float(self.hparams.main_loss_outside_weight), batch_size=batch_size)
+        self.log(f"{stage}/weights/main_loss_1to2_weight", float(self.hparams.main_loss_1to2_weight), batch_size=batch_size)
         self.log(f"{stage}/loss_components/clash", loss_clash, batch_size=batch_size)
         self.log(f"{stage}/loss_components/high_plddt_l2", high_plddt_l2, batch_size=batch_size)
         self.log(f"{stage}/loss_components/low_plddt_l2", low_plddt_l2, batch_size=batch_size)
@@ -452,6 +488,8 @@ class EvoPointLitModule(pl.LightningModule):
                 batch_size=batch_size,
             )
         if stage == "val":
+            disp_1to2_mse = None
+            disp_1to5_mse = None
             disp_1to2_mask = _in_disp_range(gt_disp_mag, low=1.0, high=2.0)
             if disp_1to2_mask.any():
                 disp_1to2_mse = F.mse_loss(delta_pred_real[disp_1to2_mask], batch.y[disp_1to2_mask])
@@ -486,6 +524,25 @@ class EvoPointLitModule(pl.LightningModule):
                 self.log(
                     "val/disp_1to5_mse",
                     disp_1to5_mse,
+                    on_step=False,
+                    on_epoch=True,
+                    prog_bar=True,
+                    batch_size=int(disp_1to5_mask.sum().item()),
+                )
+            if disp_1to2_mse is not None and disp_1to5_mse is not None:
+                selection_weight_sum = (
+                    float(self.hparams.selection_disp_1to2_weight)
+                    + float(self.hparams.selection_disp_1to5_weight)
+                )
+                if selection_weight_sum <= 0.0:
+                    selection_weight_sum = 1.0
+                disp_selection_mse = (
+                    float(self.hparams.selection_disp_1to2_weight) * disp_1to2_mse
+                    + float(self.hparams.selection_disp_1to5_weight) * disp_1to5_mse
+                ) / selection_weight_sum
+                self.log(
+                    "val/disp_selection_mse",
+                    disp_selection_mse,
                     on_step=False,
                     on_epoch=True,
                     prog_bar=True,
