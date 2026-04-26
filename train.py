@@ -196,6 +196,15 @@ def main(cfg: DictConfig):
             save_last=False,
             auto_insert_metric_name=False,
         ),
+        ModelCheckpoint(
+            dirpath=ckpt_dir,
+            filename="best-selection-{epoch:02d}-{val/disp_selection_mse:.4f}",
+            monitor="val/disp_selection_mse",
+            mode="min",
+            save_top_k=1,
+            save_last=False,
+            auto_insert_metric_name=False,
+        ),
         ValidationMetricsCSVWriter(output_dir=val_metrics_dir),
         RuntimeCostCSVWriter(output_dir=val_metrics_dir),
         RichProgressBar(),
@@ -209,6 +218,7 @@ def main(cfg: DictConfig):
     best_flex_ckpt = callbacks[0].best_model_path
     best_disp_1to5_ckpt = callbacks[1].best_model_path
     best_disp_1to2_ckpt = callbacks[2].best_model_path
+    best_selection_ckpt = callbacks[3].best_model_path
 
     if best_flex_ckpt:
         print(f"Running test with best-flex checkpoint: {best_flex_ckpt}")
@@ -227,6 +237,12 @@ def main(cfg: DictConfig):
         trainer.test(model=model, datamodule=datamodule, ckpt_path=best_disp_1to2_ckpt, weights_only=False)
     else:
         print("Skipping best-disp1to2 checkpoint test: no best-disp1to2 checkpoint was saved.")
+
+    if best_selection_ckpt:
+        print(f"Running test with best-selection checkpoint: {best_selection_ckpt}")
+        trainer.test(model=model, datamodule=datamodule, ckpt_path=best_selection_ckpt, weights_only=False)
+    else:
+        print("Skipping best-selection checkpoint test: no best-selection checkpoint was saved.")
 
 
 if __name__ == "__main__":

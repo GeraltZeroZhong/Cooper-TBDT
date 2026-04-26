@@ -147,6 +147,115 @@ class ModelHelperTests(unittest.TestCase):
 
         torch.testing.assert_close(loss, expected)
 
+    def test_main_loss_can_focus_on_displacement_band(self) -> None:
+        module = EvoPointLitModule(
+            in_channels=1,
+            hidden_dim=4,
+            num_layers=1,
+            coord_scale=1.0,
+            loss_gates_enabled=False,
+            main_loss_min_disp=1.0,
+            main_loss_max_disp=5.0,
+            main_loss_outside_weight=0.0,
+            main_loss_1to2_weight=2.0,
+        )
+        pred = torch.zeros((4, 3), dtype=torch.float32)
+        target = torch.tensor(
+            [
+                [0.5, 0.0, 0.0],
+                [1.5, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+                [6.0, 0.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        batch = Data(
+            x=torch.ones((4, 1), dtype=torch.float32),
+            pos=torch.zeros((4, 3), dtype=torch.float32),
+            y=target,
+            edge_index=torch.zeros((2, 0), dtype=torch.long),
+            edge_attr=torch.zeros((0, 2), dtype=torch.float32),
+        )
+        module.forward = lambda _batch: pred
+        module.log = lambda *args, **kwargs: None
+
+        loss = module._shared_step(batch, "train")
+        weights = torch.tensor([0.0, 2.0, 1.0, 0.0], dtype=torch.float32)
+        weights = weights / weights.mean()
+        node_loss = F.smooth_l1_loss(pred, target, reduction="none").mean(dim=-1)
+        expected = (node_loss * weights).mean()
+
+        torch.testing.assert_close(loss, expected)
+
+    def test_main_loss_can_use_mse(self) -> None:
+        module = EvoPointLitModule(
+            in_channels=1,
+            hidden_dim=4,
+            num_layers=1,
+            coord_scale=1.0,
+            loss_gates_enabled=False,
+            main_loss_type="mse",
+        )
+        pred = torch.zeros((1, 3), dtype=torch.float32)
+        target = torch.tensor([[3.0, 0.0, 0.0]], dtype=torch.float32)
+        batch = Data(
+            x=torch.ones((1, 1), dtype=torch.float32),
+            pos=torch.zeros((1, 3), dtype=torch.float32),
+            y=target,
+            edge_index=torch.zeros((2, 0), dtype=torch.long),
+            edge_attr=torch.zeros((0, 2), dtype=torch.float32),
+        )
+        module.forward = lambda _batch: pred
+        module.log = lambda *args, **kwargs: None
+
+        loss = module._shared_step(batch, "train")
+        expected = F.mse_loss(pred, target, reduction="none").mean(dim=-1).mean()
+
+        torch.testing.assert_close(loss, expected)
+
+    def test_validation_logs_weighted_selection_metric(self) -> None:
+        module = EvoPointLitModule(
+            in_channels=1,
+            hidden_dim=4,
+            num_layers=1,
+            coord_scale=1.0,
+            loss_gates_enabled=False,
+            selection_disp_1to2_weight=0.7,
+            selection_disp_1to5_weight=0.3,
+        )
+        pred = torch.zeros((3, 3), dtype=torch.float32)
+        target = torch.tensor(
+            [
+                [1.5, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+                [0.5, 0.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        batch = Data(
+            x=torch.ones((3, 1), dtype=torch.float32),
+            pos=torch.zeros((3, 3), dtype=torch.float32),
+            y=target,
+            edge_index=torch.zeros((2, 0), dtype=torch.long),
+            edge_attr=torch.zeros((0, 2), dtype=torch.float32),
+        )
+        logged = {}
+        module.forward = lambda _batch: pred
+
+        def _capture_log(name, value, *args, **kwargs):
+            if hasattr(value, "detach"):
+                value = value.detach().clone()
+            logged.setdefault(name, value)
+
+        module.log = _capture_log
+
+        module._shared_step(batch, "val")
+
+        expected_1to2 = F.mse_loss(pred[:1], target[:1])
+        expected_1to5 = F.mse_loss(pred[:2], target[:2])
+        expected_selection = 0.7 * expected_1to2 + 0.3 * expected_1to5
+        torch.testing.assert_close(logged["val/disp_selection_mse"], expected_selection)
+
 
 if __name__ == "__main__":
     unittest.main()

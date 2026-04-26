@@ -5,6 +5,13 @@ output_scale: 1.0
 target_weight_beta: 0.0
 target_weight_ref: 1.0
 target_weight_max: 4.0
+selection_disp_1to2_weight: 0.7
+selection_disp_1to5_weight: 0.3
+main_loss_min_disp: 0.0
+main_loss_max_disp: -1.0
+main_loss_outside_weight: 1.0
+main_loss_1to2_weight: 1.0
+main_loss_type: smooth_l1
 in_channels: 144
 hidden_dim: 128
 num_layers: 4
