@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 import torch
+import torch.nn.functional as F
 from torch_geometric.data import Data
 
 from evopoint_da.data.graph import (
@@ -65,6 +66,37 @@ class ModelHelperTests(unittest.TestCase):
 
         self.assertEqual(tuple(pred.shape), (3, 3))
         self.assertTrue(bool(torch.isfinite(pred).all()))
+
+    def test_loss_gates_can_disable_auxiliary_terms(self) -> None:
+        module = EvoPointLitModule(
+            in_channels=1,
+            hidden_dim=4,
+            num_layers=1,
+            coord_scale=1.0,
+            loss_gates_enabled=False,
+            lambda_cos=100.0,
+            lambda_mag=100.0,
+            lambda_clash=100.0,
+            lambda_high_plddt_l2=100.0,
+            lambda_low_plddt_l2=100.0,
+        )
+        pred = torch.tensor([[0.5, 0.0, 0.0], [0.0, -0.5, 0.0]], dtype=torch.float32)
+        target = torch.tensor([[1.5, 0.0, 0.0], [0.0, 0.5, 0.0]], dtype=torch.float32)
+        batch = Data(
+            x=torch.ones((2, 1), dtype=torch.float32),
+            pos=torch.zeros((2, 3), dtype=torch.float32),
+            y=target,
+            plddt=torch.tensor([[10.0], [95.0]], dtype=torch.float32),
+            edge_index=torch.tensor([[0, 1], [1, 0]], dtype=torch.long),
+            edge_attr=torch.zeros((2, 2), dtype=torch.float32),
+        )
+        module.forward = lambda _batch: pred
+        module.log = lambda *args, **kwargs: None
+
+        loss = module._shared_step(batch, "train")
+        expected = F.smooth_l1_loss(pred, target, reduction="none").mean(dim=-1).mean()
+
+        torch.testing.assert_close(loss, expected)
 
 
 if __name__ == "__main__":

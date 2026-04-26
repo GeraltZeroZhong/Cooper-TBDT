@@ -35,6 +35,7 @@ class EvoPointLitModule(pl.LightningModule):
         edge_vector_dim: int = 1,
         gvp_vector_dim: int = 16,
         gvp_dropout: float = 0.1,
+        loss_gates_enabled: bool = True,
         lr: float = 1e-4,
         weight_decay: float = 1e-5,
         lambda_clash: float = 0.1,
@@ -304,17 +305,18 @@ class EvoPointLitModule(pl.LightningModule):
         delta_pred = self.forward(batch)
         high_plddt_l2 = torch.zeros((), device=self.device, dtype=delta_pred.dtype)
         low_plddt_l2 = torch.zeros((), device=self.device, dtype=delta_pred.dtype)
+        loss_gates_enabled = bool(self.hparams.loss_gates_enabled)
 
         def _warmup_factor(warmup_epochs: int) -> float:
             if warmup_epochs <= 0:
                 return 1.0
             return min(1.0, float(self.current_epoch + 1) / float(warmup_epochs))
 
-        cos_warmup = _warmup_factor(int(self.hparams.cos_warmup_epochs))
-        mag_warmup = _warmup_factor(int(self.hparams.mag_warmup_epochs))
-        focus_warmup = _warmup_factor(int(self.hparams.focus_warmup_epochs))
+        cos_warmup = _warmup_factor(int(self.hparams.cos_warmup_epochs)) if loss_gates_enabled else 0.0
+        mag_warmup = _warmup_factor(int(self.hparams.mag_warmup_epochs)) if loss_gates_enabled else 0.0
+        focus_warmup = _warmup_factor(int(self.hparams.focus_warmup_epochs)) if loss_gates_enabled else 0.0
 
-        if hasattr(batch, "plddt") and batch.plddt is not None:
+        if loss_gates_enabled and hasattr(batch, "plddt") and batch.plddt is not None:
             plddt = _as_raw_plddt(batch.plddt)
 
             low_plddt_threshold = self.hparams.plddt_gate_start
@@ -337,10 +339,11 @@ class EvoPointLitModule(pl.LightningModule):
         focus_max = self.hparams.disp_focus_max
         in_focus = (target_mag_real >= focus_min) & (target_mag_real < focus_max)
         focus_weights = torch.ones_like(target_mag_real)
-        focus_weights[in_focus] = self.hparams.disp_focus_weight
-        over_max = target_mag_real >= focus_max
-        focus_weights[over_max] = self.hparams.disp_over_max_weight
-        mse_weights = mse_weights * (1.0 + focus_warmup * (focus_weights - 1.0))
+        if loss_gates_enabled:
+            focus_weights[in_focus] = self.hparams.disp_focus_weight
+            over_max = target_mag_real >= focus_max
+            focus_weights[over_max] = self.hparams.disp_over_max_weight
+            mse_weights = mse_weights * (1.0 + focus_warmup * (focus_weights - 1.0))
 
         mse_weights = mse_weights / (mse_weights.mean().detach() + self.hparams.eps)
 
@@ -352,7 +355,7 @@ class EvoPointLitModule(pl.LightningModule):
         )
         direction_mask = mask_focus
         
-        if direction_mask.sum() > 0:
+        if loss_gates_enabled and direction_mask.sum() > 0:
             cos_sim = F.cosine_similarity(
                 delta_pred[direction_mask],
                 target_norm[direction_mask],
@@ -369,18 +372,25 @@ class EvoPointLitModule(pl.LightningModule):
 
         delta_pred_real = delta_pred * self.coord_scale
         pos_pred = batch.pos + delta_pred_real
-        loss_clash = self._clash_penalty(pos_pred, batch.edge_index)
+        loss_clash = (
+            self._clash_penalty(pos_pred, batch.edge_index)
+            if loss_gates_enabled
+            else torch.zeros((), device=self.device, dtype=delta_pred.dtype)
+        )
         
         lambda_cos_eff = self.hparams.lambda_cos * cos_warmup
         lambda_mag_eff = self.hparams.lambda_mag * mag_warmup
+        lambda_clash_eff = self.hparams.lambda_clash if loss_gates_enabled else 0.0
+        lambda_high_plddt_l2_eff = self.hparams.lambda_high_plddt_l2 if loss_gates_enabled else 0.0
+        lambda_low_plddt_l2_eff = self.hparams.lambda_low_plddt_l2 if loss_gates_enabled else 0.0
 
         loss = (
             loss_mse
             + lambda_cos_eff * loss_cos
             + lambda_mag_eff * loss_mag
-            + self.hparams.lambda_clash * loss_clash
-            + self.hparams.lambda_high_plddt_l2 * high_plddt_l2
-            + self.hparams.lambda_low_plddt_l2 * low_plddt_l2
+            + lambda_clash_eff * loss_clash
+            + lambda_high_plddt_l2_eff * high_plddt_l2
+            + lambda_low_plddt_l2_eff * low_plddt_l2
         )
         
         batch_size = getattr(batch, "num_graphs", None)
@@ -396,9 +406,13 @@ class EvoPointLitModule(pl.LightningModule):
         self.log(f"{stage}/loss_components/magnitude", loss_mag, batch_size=batch_size)
         self.log(f"{stage}/weights/lambda_cos_eff", lambda_cos_eff, batch_size=batch_size)
         self.log(f"{stage}/weights/lambda_mag_eff", lambda_mag_eff, batch_size=batch_size)
+        self.log(f"{stage}/weights/lambda_clash_eff", lambda_clash_eff, batch_size=batch_size)
+        self.log(f"{stage}/weights/lambda_high_plddt_l2_eff", lambda_high_plddt_l2_eff, batch_size=batch_size)
+        self.log(f"{stage}/weights/lambda_low_plddt_l2_eff", lambda_low_plddt_l2_eff, batch_size=batch_size)
         self.log(f"{stage}/weights/cos_warmup", cos_warmup, batch_size=batch_size)
         self.log(f"{stage}/weights/mag_warmup", mag_warmup, batch_size=batch_size)
         self.log(f"{stage}/weights/focus_warmup", focus_warmup, batch_size=batch_size)
+        self.log(f"{stage}/weights/loss_gates_enabled", float(loss_gates_enabled), batch_size=batch_size)
         self.log(f"{stage}/loss_components/clash", loss_clash, batch_size=batch_size)
         self.log(f"{stage}/loss_components/high_plddt_l2", high_plddt_l2, batch_size=batch_size)
         self.log(f"{stage}/loss_components/low_plddt_l2", low_plddt_l2, batch_size=batch_size)
@@ -492,9 +506,15 @@ class EvoPointLitModule(pl.LightningModule):
 
         loss_mse_real = F.mse_loss(delta_pred_real, batch.y)
         pos_pred = batch.pos + delta_pred_real
-        loss_clash = self._clash_penalty(pos_pred, batch.edge_index)
+        loss_gates_enabled = bool(self.hparams.loss_gates_enabled)
+        loss_clash = (
+            self._clash_penalty(pos_pred, batch.edge_index)
+            if loss_gates_enabled
+            else torch.zeros((), device=self.device, dtype=delta_pred_real.dtype)
+        )
+        lambda_clash_eff = self.hparams.lambda_clash if loss_gates_enabled else 0.0
 
-        loss = loss_mse_real + self.hparams.lambda_clash * loss_clash
+        loss = loss_mse_real + lambda_clash_eff * loss_clash
 
         self.log("test/loss", loss)
         self.log("test/loss_mse", loss_mse_real)
@@ -502,6 +522,8 @@ class EvoPointLitModule(pl.LightningModule):
         self.log("test/loss_clash", loss_clash)
         self.log("test/loss_components/weighted_node", loss_mse_real)
         self.log("test/loss_components/clash", loss_clash)
+        self.log("test/weights/lambda_clash_eff", lambda_clash_eff)
+        self.log("test/weights/loss_gates_enabled", float(loss_gates_enabled))
 
         baseline_delta = torch.zeros_like(batch.y)
         baseline_sq_error = baseline_delta - batch.y
