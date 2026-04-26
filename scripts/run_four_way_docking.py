@@ -1,9 +1,9 @@
 #!/usr/bin/env python
-"""Run four-way docking comparison for Raw AF2, AF2+OpenMM, HoloShift, and true holo.
+"""Run five-way docking comparison for Raw AF2, AF2+OpenMM, HoloShift, and true holo.
 
 The script wraps evopoint_da.docking_eval.pipeline so the same docking box,
 ligand preparation, Vina settings, RMSD threshold, and summaries are used for
-all four receptor inputs.
+all receptor inputs.
 """
 
 from __future__ import annotations
@@ -36,7 +36,8 @@ from get_af2 import download_af2_model, download_pae
 STRUCTURES = [
     ("raw_af2", "receptor_raw_af2", "Raw AF2"),
     ("af2_openmm_relax", "receptor_af2_openmm_relax", "AF2 + OpenMM Relax"),
-    ("holoshift", "receptor_holoshift", "HoloShift (Ours)"),
+    ("holoshift_unrelaxed", "receptor_holoshift_unrelaxed", "HoloShift unrelaxed"),
+    ("holoshift", "receptor_holoshift", "HoloShift + OpenMM Relax"),
     ("true_holo", "receptor_true_holo", "True Holo PDB"),
 ]
 
@@ -70,6 +71,7 @@ class PreparedInputs:
     manifest: Path
     raw_af2: Path
     af2_openmm_relax: Path
+    holoshift_unrelaxed: Path
     holoshift: Path
     true_holo: Path
     notes: list[str]
@@ -510,6 +512,67 @@ def _write_manifest(path: Path, row: dict[str, str]) -> Path:
     return path
 
 
+def _resolve_manifest_path(raw: str | None, manifest_dir: Path) -> Path | None:
+    if raw is None or str(raw).strip() == "":
+        return None
+    path = Path(str(raw)).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    return (manifest_dir / path).resolve()
+
+
+def _infer_holoshift_unrelaxed_path(row: dict[str, str], manifest_dir: Path) -> Path | None:
+    existing = _resolve_manifest_path(row.get("receptor_holoshift_unrelaxed"), manifest_dir)
+    if existing is not None:
+        return existing
+
+    target_id = row.get("target_id", "").strip()
+    holoshift = _resolve_manifest_path(row.get("receptor_holoshift"), manifest_dir)
+    candidates: list[Path] = []
+    if holoshift is not None:
+        candidates.append(holoshift.with_name(f"{holoshift.stem}_predicted_unrelaxed{holoshift.suffix}"))
+        if target_id:
+            candidates.append(holoshift.parent / f"{target_id}_holoshift_predict_openmm_relax_predicted_unrelaxed.pdb")
+            candidates.append(holoshift.parent / "prepared_inputs" / f"{target_id}_holoshift_predict_openmm_relax_predicted_unrelaxed.pdb")
+    if target_id:
+        candidates.append(manifest_dir / "prepared_inputs" / f"{target_id}_holoshift_predict_openmm_relax_predicted_unrelaxed.pdb")
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return None
+
+
+def ensure_five_way_manifest(manifest: Path, out_dir: Path) -> Path:
+    rows = read_table(manifest)
+    if rows and all(str(row.get("receptor_holoshift_unrelaxed", "")).strip() for row in rows):
+        return manifest
+
+    manifest_dir = manifest.parent
+    augmented_rows: list[dict[str, Any]] = []
+    missing_targets: list[str] = []
+    for row in rows:
+        out = dict(row)
+        inferred = _infer_holoshift_unrelaxed_path(row, manifest_dir)
+        if inferred is None:
+            missing_targets.append(str(row.get("target_id", "")))
+        else:
+            out["receptor_holoshift_unrelaxed"] = str(inferred)
+        augmented_rows.append(out)
+
+    if missing_targets:
+        targets = ", ".join(target or "<missing target_id>" for target in missing_targets)
+        raise FileNotFoundError(
+            "Five-way docking requires receptor_holoshift_unrelaxed. "
+            f"Could not infer it for target(s): {targets}. "
+            "Pass --holoshift-unrelaxed-pdb when preparing inputs, or add the column to the manifest."
+        )
+
+    augmented = out_dir / "five_way_manifest.csv"
+    write_csv(augmented, augmented_rows)
+    return augmented
+
+
 def prepare_single_target_inputs(args: argparse.Namespace) -> PreparedInputs:
     out_dir = _path(args.out_dir) or REPO_ROOT / "outputs/docking_four_way"
     work_dir = _path(args.work_dir) or out_dir / "prepared_inputs"
@@ -568,6 +631,8 @@ def prepare_single_target_inputs(args: argparse.Namespace) -> PreparedInputs:
         notes.append(f"Generated AF2 + OpenMM Relax receptor: {af2_relax}")
 
     holoshift_source = _path(args.holoshift_pdb)
+    holoshift_unrelaxed_source = _path(args.holoshift_unrelaxed_pdb)
+    holoshift_unrelaxed: Path | None = holoshift_unrelaxed_source
     if holoshift_source is None:
         holoshift_ckpt = _path(args.holoshift_ckpt)
         if holoshift_ckpt is not None:
@@ -633,6 +698,11 @@ def prepare_single_target_inputs(args: argparse.Namespace) -> PreparedInputs:
                 f"{holoshift_ckpt}; feature_source={report.get('feature_source')}, "
                 f"mean|delta|={report.get('prediction_delta_norm', {}).get('mean', 0.0):.3f} A."
             )
+            predicted_unrelaxed = _path(report.get("predicted_unrelaxed_pdb"))
+            if predicted_unrelaxed is None:
+                predicted_unrelaxed = holoshift.with_name(f"{holoshift.stem}_predicted_unrelaxed{holoshift.suffix}")
+            holoshift_unrelaxed = predicted_unrelaxed
+            notes.append(f"Generated HoloShift unrelaxed receptor: {holoshift_unrelaxed}")
         else:
             raise ValueError("Provide --holoshift-pdb or --holoshift-ckpt to build the HoloShift receptor.")
     elif args.align_crop_holoshift:
@@ -647,8 +717,35 @@ def prepare_single_target_inputs(args: argparse.Namespace) -> PreparedInputs:
             match_residue_names=not args.no_match_residue_names,
         )
         alignment_reports.append({"label": "holoshift", **report})
+        if holoshift_unrelaxed_source is not None:
+            holoshift_unrelaxed = work_dir / f"{args.target_id}_holoshift_unrelaxed_aligned_cropped.pdb"
+            report = align_crop_to_reference(
+                moving_pdb=holoshift_unrelaxed_source,
+                reference_pdb=true_holo,
+                output_pdb=holoshift_unrelaxed,
+                moving_chain=args.moving_chain,
+                reference_chain=args.reference_chain,
+                min_ca_pairs=args.min_ca_pairs,
+                match_residue_names=not args.no_match_residue_names,
+            )
+            alignment_reports.append({"label": "holoshift_unrelaxed", **report})
     else:
         holoshift = holoshift_source
+
+    if holoshift_unrelaxed is None:
+        inferred = _infer_holoshift_unrelaxed_path(
+            {"target_id": args.target_id, "receptor_holoshift": str(holoshift)},
+            work_dir,
+        )
+        if inferred is not None:
+            holoshift_unrelaxed = inferred
+
+    if holoshift_unrelaxed is None or not holoshift_unrelaxed.exists():
+        raise FileNotFoundError(
+            "Five-way docking requires a HoloShift receptor before OpenMM relaxation. "
+            "Pass --holoshift-unrelaxed-pdb, or generate HoloShift from --holoshift-ckpt so "
+            "the predicted_unrelaxed PDB is produced automatically."
+        )
 
     if alignment_reports:
         (work_dir / f"{args.target_id}_alignment_report.json").write_text(
@@ -661,6 +758,7 @@ def prepare_single_target_inputs(args: argparse.Namespace) -> PreparedInputs:
         "target_id": args.target_id,
         "receptor_raw_af2": str(raw_af2),
         "receptor_af2_openmm_relax": str(af2_relax),
+        "receptor_holoshift_unrelaxed": str(holoshift_unrelaxed),
         "receptor_holoshift": str(holoshift),
         "receptor_true_holo": str(true_holo),
         "ligand_sdf": str(ligand_sdf),
@@ -671,6 +769,7 @@ def prepare_single_target_inputs(args: argparse.Namespace) -> PreparedInputs:
         manifest=manifest,
         raw_af2=raw_af2,
         af2_openmm_relax=af2_relax,
+        holoshift_unrelaxed=holoshift_unrelaxed,
         holoshift=holoshift,
         true_holo=true_holo,
         notes=notes,
@@ -752,10 +851,12 @@ def write_four_way_reports(out_dir: Path, notes: list[str]) -> None:
     score_rows = read_table(scores_path)
     summary_rows = _four_way_summary_rows(summary)
     score_delta_rows = _target_score_rows_with_deltas(score_rows)
+    write_csv(out_dir / "five_way_summary.csv", summary_rows)
+    write_csv(out_dir / "five_way_scores.csv", score_delta_rows)
     write_csv(out_dir / "four_way_summary.csv", summary_rows)
     write_csv(out_dir / "four_way_scores.csv", score_delta_rows)
 
-    lines = ["# Four-Way Docking Comparison", ""]
+    lines = ["# Five-Way Docking Comparison", ""]
     if notes:
         lines += ["## Notes"]
         lines += [f"- {note}" for note in notes]
@@ -804,17 +905,8 @@ def write_four_way_reports(out_dir: Path, notes: list[str]) -> None:
 
     if score_delta_rows:
         lines += ["", "## Per-Target Top-1"]
-        header = [
-            "target_id",
-            "score_raw_af2",
-            "score_af2_openmm_relax",
-            "score_holoshift",
-            "score_true_holo",
-            "top1_rmsd_raw_af2",
-            "top1_rmsd_af2_openmm_relax",
-            "top1_rmsd_holoshift",
-            "top1_rmsd_true_holo",
-        ]
+        labels = [label for label, _col, _display in STRUCTURES]
+        header = ["target_id", *[f"score_{label}" for label in labels], *[f"top1_rmsd_{label}" for label in labels]]
         lines.append("")
         lines.append("| " + " | ".join(header) + " |")
         lines.append("|" + "|".join(["---"] * len(header)) + "|")
@@ -824,7 +916,9 @@ def write_four_way_reports(out_dir: Path, notes: list[str]) -> None:
                 values.append(_fmt(row.get(key), 3))
             lines.append("| " + " | ".join(values) + " |")
 
-    (out_dir / "four_way_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    report_text = "\n".join(lines) + "\n"
+    (out_dir / "five_way_report.md").write_text(report_text, encoding="utf-8")
+    (out_dir / "four_way_report.md").write_text(report_text, encoding="utf-8")
 
 
 def _parse_topn_levels(raw: str) -> list[int]:
@@ -835,8 +929,13 @@ def _parse_topn_levels(raw: str) -> list[int]:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Run Raw AF2 / AF2+OpenMM / HoloShift / True Holo docking comparison.")
-    p.add_argument("--manifest", type=Path, default=None, help="Existing four-way manifest. Skips receptor prep.")
+    p = argparse.ArgumentParser(
+        description=(
+            "Run Raw AF2 / AF2+OpenMM / HoloShift unrelaxed / "
+            "HoloShift+OpenMM / True Holo docking comparison."
+        )
+    )
+    p.add_argument("--manifest", type=Path, default=None, help="Existing docking manifest. Skips receptor prep.")
     p.add_argument("--target-id", default="target")
     p.add_argument("--out-dir", type=Path, default=Path("outputs/docking_four_way"))
     p.add_argument("--work-dir", type=Path, default=None)
@@ -847,6 +946,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--af2-version", type=int, default=6)
     p.add_argument("--af2-openmm-relax-pdb", default=None)
     p.add_argument("--holoshift-pdb", default=None)
+    p.add_argument(
+        "--holoshift-unrelaxed-pdb",
+        default=None,
+        help="HoloShift predicted receptor before OpenMM relaxation; required when --holoshift-pdb is provided externally.",
+    )
     p.add_argument("--holoshift-ckpt", default=None, help="Checkpoint used to generate HoloShift receptor if --holoshift-pdb is absent.")
     p.add_argument(
         "--holoshift-feature-pt",
@@ -938,6 +1042,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     notes: list[str] = []
+    out_dir = _path(args.out_dir)
+    if out_dir is None:
+        raise ValueError("--out-dir cannot be empty.")
+
     if args.manifest:
         manifest = _path(args.manifest)
         if manifest is None:
@@ -947,9 +1055,7 @@ def main() -> None:
         manifest = prepared.manifest
         notes.extend(prepared.notes)
 
-    out_dir = _path(args.out_dir)
-    if out_dir is None:
-        raise ValueError("--out-dir cannot be empty.")
+    manifest = ensure_five_way_manifest(manifest, out_dir)
 
     cfg = DockingPipelineConfig(
         manifest=manifest,
@@ -974,7 +1080,8 @@ def main() -> None:
     summary = run_docking_pipeline(cfg)
     write_four_way_reports(out_dir, notes)
     print(json.dumps(summary, indent=2, ensure_ascii=False))
-    print(f"Four-way report: {out_dir / 'four_way_report.md'}")
+    print(f"Five-way report: {out_dir / 'five_way_report.md'}")
+    print(f"Compatibility report alias: {out_dir / 'four_way_report.md'}")
 
 
 if __name__ == "__main__":
