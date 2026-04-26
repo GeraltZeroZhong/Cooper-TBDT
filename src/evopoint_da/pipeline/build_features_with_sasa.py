@@ -18,7 +18,7 @@ from evopoint_da.data.features import (
     PCAReducer,
     compute_structural_node_features,
 )
-from evopoint_da.data.graph import build_knn_edges, parse_pae_matrix
+from evopoint_da.data.graph import build_gvp_graph_features, build_knn_edges, parse_pae_matrix
 from evopoint_da.data.paths import DEFAULT_PDB_UNIPROT_MAPPING
 
 PLDDT_SCALE_MAX = 100.0
@@ -173,16 +173,20 @@ def main() -> None:
             skip_reasons["missing_pae_fallback_zero"] += 1
         pae = parse_pae_matrix(pae_path, len(d["residue_ids"]))
         edge_index, edge_attr = build_knn_edges(d["af2_pos"].float(), k=args.k, pae=pae)
+        node_v, edge_s, edge_v = build_gvp_graph_features(d["af2_pos"].float(), edge_index, edge_attr)
 
         out = {
             "pair_id": stem,
             "residue_ids": d["residue_ids"],
             "x": x,
+            "node_v": node_v,
             "pos": d["af2_pos"].float(),
             "y_delta": d["y_delta"].float(),
             "plddt": plddt_raw,
             "edge_index": edge_index,
             "edge_attr": edge_attr,
+            "edge_s": edge_s,
+            "edge_v": edge_v,
         }
         torch.save(out, os.path.join(args.output_dir, f"{stem}.pt"))
         processed_count += 1

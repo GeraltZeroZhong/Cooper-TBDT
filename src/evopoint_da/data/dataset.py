@@ -8,6 +8,11 @@ from typing import List
 import torch
 from torch_geometric.data import Data, InMemoryDataset
 
+from .graph import build_gvp_graph_features, gvp_edge_scalar_dim
+
+
+GVP_FEATURE_SCHEMA_VERSION = 1
+
 
 def build_split_file_lists(root: str, split_ranges: dict, split_seed: int) -> dict[str, list[str]]:
     raw_files = sorted(glob.glob(os.path.join(root, "*.pt")))
@@ -71,6 +76,7 @@ class EvoPointDataset(InMemoryDataset):
             "allow_empty_fallback": bool(self.allow_empty_fallback),
             "allow_length_truncation": bool(self.allow_length_truncation),
             "plddt_feature_index": int(self.plddt_feature_index),
+            "gvp_feature_schema_version": GVP_FEATURE_SCHEMA_VERSION,
         }
         raw = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
         return hashlib.sha256(raw).hexdigest()[:12]
@@ -140,18 +146,55 @@ class EvoPointDataset(InMemoryDataset):
 
             edge_index = d.get("edge_index", None)
             edge_attr = d.get("edge_attr", None)
+            edge_s = d.get("edge_s", None)
+            edge_v = d.get("edge_v", None)
             if edge_index is None or edge_attr is None:
                 edge_index = torch.zeros((2, 0), dtype=torch.long)
                 edge_attr = torch.zeros((0, 2), dtype=torch.float32)
+            edge_index = edge_index.long()
+            edge_attr = edge_attr.float()
+            if edge_index.numel() > 0:
+                valid_edges = (
+                    (edge_index[0] >= 0)
+                    & (edge_index[1] >= 0)
+                    & (edge_index[0] < pos.size(0))
+                    & (edge_index[1] < pos.size(0))
+                )
+                if not bool(valid_edges.all()):
+                    edge_index = edge_index[:, valid_edges]
+                    edge_attr = edge_attr[valid_edges]
+                    if edge_s is not None:
+                        edge_s = edge_s[valid_edges]
+                    if edge_v is not None:
+                        edge_v = edge_v[valid_edges]
+
+            node_v = d.get("node_v", None)
+            if (
+                node_v is None
+                or edge_s is None
+                or edge_v is None
+                or node_v.size(0) != pos.size(0)
+                or edge_s.size(0) != edge_index.size(1)
+                or edge_v.size(0) != edge_index.size(1)
+            ):
+                node_v, edge_s, edge_v = build_gvp_graph_features(pos, edge_index, edge_attr)
+            else:
+                node_v = node_v.float()
+                edge_s = edge_s.float()
+                edge_v = edge_v.float()
+
             total_edges += int(edge_index.size(1))
             data_list.append(
                 Data(
                     x=x,
+                    node_v=node_v,
                     pos=pos,
                     y=y_delta,
                     plddt=plddt,
                     edge_index=edge_index,
                     edge_attr=edge_attr,
+                    edge_s=edge_s,
+                    edge_v=edge_v,
                     pair_id=d.get("pair_id", os.path.splitext(os.path.basename(f))[0]),
                     residue_ids=d.get("residue_ids", None),
                 )
@@ -179,10 +222,13 @@ class EvoPointDataset(InMemoryDataset):
             data_list = [
                 Data(
                     x=torch.zeros((1, self.fallback_num_features), dtype=torch.float32),
+                    node_v=torch.zeros((1, 3, 3), dtype=torch.float32),
                     pos=torch.zeros((1, 3), dtype=torch.float32),
                     y=torch.zeros((1, 3), dtype=torch.float32),
                     edge_index=torch.zeros((2, 0), dtype=torch.long),
                     edge_attr=torch.zeros((0, 2), dtype=torch.float32),
+                    edge_s=torch.zeros((0, gvp_edge_scalar_dim()), dtype=torch.float32),
+                    edge_v=torch.zeros((0, 1, 3), dtype=torch.float32),
                 )
             ]
 

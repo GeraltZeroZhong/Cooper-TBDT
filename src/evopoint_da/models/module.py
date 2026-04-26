@@ -2,9 +2,11 @@ import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
 
+from evopoint_da.data.graph import build_gvp_graph_features
 from evopoint_da.utils.binning import build_bin_ranges as _build_bin_ranges
 
 from .backbones.egnn import EGNNBackbone
+from .backbones.gvp import GVPBackbone
 
 
 def _in_disp_range(values: torch.Tensor, low: float, high: float) -> torch.Tensor:
@@ -27,6 +29,12 @@ class EvoPointLitModule(pl.LightningModule):
         hidden_dim: int = 128,
         num_layers: int = 4,
         edge_dim: int = 2,
+        backbone_type: str = "egnn",
+        node_vector_dim: int = 3,
+        edge_scalar_dim: int = 26,
+        edge_vector_dim: int = 1,
+        gvp_vector_dim: int = 16,
+        gvp_dropout: float = 0.1,
         lr: float = 1e-4,
         weight_decay: float = 1e-5,
         lambda_clash: float = 0.1,
@@ -69,13 +77,29 @@ class EvoPointLitModule(pl.LightningModule):
         if test_disp_bin_edges is None:
             test_disp_bin_edges = [0.0, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0]
         self.save_hyperparameters()
-        self.backbone = EGNNBackbone(
-            in_channels=in_channels,
-            hidden_dim=hidden_dim,
-            num_layers=num_layers,
-            edge_dim=edge_dim,
-            coord_init_gain=coord_init_gain,
-        )
+        self.backbone_type = str(backbone_type).lower()
+        if self.backbone_type == "egnn":
+            self.backbone = EGNNBackbone(
+                in_channels=in_channels,
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                edge_dim=edge_dim,
+                coord_init_gain=coord_init_gain,
+            )
+        elif self.backbone_type == "gvp":
+            self.backbone = GVPBackbone(
+                node_scalar_dim=in_channels,
+                node_vector_dim=node_vector_dim,
+                edge_scalar_dim=edge_scalar_dim,
+                edge_vector_dim=edge_vector_dim,
+                hidden_dim=hidden_dim,
+                vector_dim=gvp_vector_dim,
+                num_layers=num_layers,
+                dropout=gvp_dropout,
+                output_init_gain=coord_init_gain,
+            )
+        else:
+            raise ValueError(f"Unknown backbone_type: {backbone_type!r}")
         self.coord_scale = coord_scale
         self._test_disp_agg = {}
 
@@ -158,6 +182,25 @@ class EvoPointLitModule(pl.LightningModule):
             self.log("test/summary/disp_1to5_rel_improve_vs_baseline", rel_improve)
 
     def forward(self, batch):
+        if self.backbone_type == "gvp":
+            node_v = getattr(batch, "node_v", None)
+            edge_s = getattr(batch, "edge_s", None)
+            edge_v = getattr(batch, "edge_v", None)
+            if (
+                node_v is None
+                or edge_s is None
+                or edge_v is None
+                or node_v.size(0) != batch.x.size(0)
+                or edge_s.size(0) != batch.edge_index.size(1)
+                or edge_v.size(0) != batch.edge_index.size(1)
+            ):
+                node_v, edge_s, edge_v = build_gvp_graph_features(
+                    batch.pos,
+                    batch.edge_index,
+                    getattr(batch, "edge_attr", None),
+                )
+            return self.backbone(batch.x, node_v, batch.edge_index, edge_s, edge_v)
+
         _, pos_updated = self.backbone(batch.x, batch.pos, batch.edge_index, batch.edge_attr)
         return pos_updated - batch.pos
 
