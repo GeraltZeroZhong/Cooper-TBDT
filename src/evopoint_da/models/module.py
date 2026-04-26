@@ -36,6 +36,10 @@ class EvoPointLitModule(pl.LightningModule):
         gvp_vector_dim: int = 16,
         gvp_dropout: float = 0.1,
         loss_gates_enabled: bool = True,
+        output_scale: float = 1.0,
+        target_weight_beta: float = 0.0,
+        target_weight_ref: float = 1.0,
+        target_weight_max: float = 4.0,
         lr: float = 1e-4,
         weight_decay: float = 1e-5,
         lambda_clash: float = 0.1,
@@ -200,10 +204,10 @@ class EvoPointLitModule(pl.LightningModule):
                     batch.edge_index,
                     getattr(batch, "edge_attr", None),
                 )
-            return self.backbone(batch.x, node_v, batch.edge_index, edge_s, edge_v)
+            return self.backbone(batch.x, node_v, batch.edge_index, edge_s, edge_v) * self.hparams.output_scale
 
         _, pos_updated = self.backbone(batch.x, batch.pos, batch.edge_index, batch.edge_attr)
-        return pos_updated - batch.pos
+        return (pos_updated - batch.pos) * self.hparams.output_scale
 
     def predict_displacement(self, batch, *, apply_inference_multiplier: bool = False):
         """Return displacement in the same real-coordinate scale used by validation.
@@ -334,6 +338,14 @@ class EvoPointLitModule(pl.LightningModule):
         target_norm = batch.y / self.coord_scale
         target_mag_real = torch.norm(batch.y, dim=-1)
         mse_weights = torch.ones_like(target_mag_real)
+        target_weights = torch.ones_like(target_mag_real)
+        if self.hparams.target_weight_beta > 0.0:
+            target_scale = target_mag_real / max(float(self.hparams.target_weight_ref), self.hparams.eps)
+            target_weights = target_weights + self.hparams.target_weight_beta * target_scale.clamp(
+                min=0.0,
+                max=float(self.hparams.target_weight_max),
+            )
+            mse_weights = mse_weights * target_weights
 
         focus_min = self.hparams.disp_focus_min
         focus_max = self.hparams.disp_focus_max
@@ -413,6 +425,10 @@ class EvoPointLitModule(pl.LightningModule):
         self.log(f"{stage}/weights/mag_warmup", mag_warmup, batch_size=batch_size)
         self.log(f"{stage}/weights/focus_warmup", focus_warmup, batch_size=batch_size)
         self.log(f"{stage}/weights/loss_gates_enabled", float(loss_gates_enabled), batch_size=batch_size)
+        self.log(f"{stage}/weights/output_scale", float(self.hparams.output_scale), batch_size=batch_size)
+        self.log(f"{stage}/weights/target_weight_beta", float(self.hparams.target_weight_beta), batch_size=batch_size)
+        self.log(f"{stage}/weights/target_weight_mean", target_weights.mean(), batch_size=batch_size)
+        self.log(f"{stage}/weights/target_weight_std", target_weights.std(unbiased=False), batch_size=batch_size)
         self.log(f"{stage}/loss_components/clash", loss_clash, batch_size=batch_size)
         self.log(f"{stage}/loss_components/high_plddt_l2", high_plddt_l2, batch_size=batch_size)
         self.log(f"{stage}/loss_components/low_plddt_l2", low_plddt_l2, batch_size=batch_size)
