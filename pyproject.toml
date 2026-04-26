@@ -14,6 +14,11 @@ dev = [
     "pytest>=8.0",
     "pip-audit>=2.7",
 ]
+docking = [
+    "rdkit>=2023.9",
+    "meeko>=0.7,<0.8",
+    "vina>=1.2,<1.3",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
