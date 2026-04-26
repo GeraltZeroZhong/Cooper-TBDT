@@ -29,8 +29,9 @@ if str(SRC_DIR) not in sys.path:
 
 from evopoint_da.docking_eval.io_utils import read_table, write_csv
 from evopoint_da.docking_eval.pipeline import DockingPipelineConfig, StructureSpec, run_docking_pipeline
+from evopoint_da.pipeline.build_prediction_features import PredictionFeatureBuildConfig, build_prediction_feature_graph
 from evopoint_da.pipeline.predict import predict_and_relax
-from get_af2 import download_af2_model
+from get_af2 import download_af2_model, download_pae
 
 STRUCTURES = [
     ("raw_af2", "receptor_raw_af2", "Raw AF2"),
@@ -115,6 +116,19 @@ def _download_af2(uniprot_id: str, version: int, output_dir: Path, *, reuse: boo
     if downloaded is None:
         raise FileNotFoundError(f"AlphaFold model was not found for UniProt {uniprot_id} v{version}.")
     return Path(downloaded)
+
+
+def _download_af2_pae(uniprot_id: str, output_dir: Path, *, reuse: bool = True) -> Path:
+    uniprot_id = uniprot_id.strip()
+    if not uniprot_id:
+        raise ValueError("UniProt ID cannot be empty when downloading PAE.")
+    output_path = output_dir / f"AF-{uniprot_id}.json"
+    if reuse and output_path.exists() and output_path.stat().st_size > 0:
+        return output_path
+    ok = download_pae(uniprot_id, str(output_dir))
+    if not ok or not output_path.exists():
+        raise FileNotFoundError(f"AlphaFold PAE was not found for UniProt {uniprot_id}.")
+    return output_path
 
 
 def _get_chain(structure, chain_id: str):  # noqa: ANN001
@@ -410,11 +424,10 @@ def generate_holoshift_receptor(
     output_pdb: Path,
     report_path: Path,
     checkpoint: Path,
-    feature_pt: Path | None,
+    feature_pt: Path,
     chain_id: str,
     k: int,
     device: str,
-    allow_fallback_features: bool,
     conformal_stats: Path | None,
     reject_threshold: float,
     apply_inference_multiplier: bool,
@@ -436,9 +449,8 @@ def generate_holoshift_receptor(
 
     predict_args = argparse.Namespace(
         pdb_file=str(input_pdb),
-        feature_pt=str(feature_pt) if feature_pt else None,
-        allow_fallback_features=allow_fallback_features,
-        save_auto_feature_pt=None,
+        feature_pt=str(feature_pt),
+        feature_pos_tolerance=1e-3,
         ckpt_path=str(checkpoint),
         conformal_stats=str(conformal_stats) if conformal_stats else None,
         reject_threshold=reject_threshold,
@@ -467,8 +479,8 @@ def generate_holoshift_receptor(
             "predicted_unrelaxed_pdb": str(predicted_full_atom),
             "output_pdb": str(output_pdb),
             "checkpoint": str(checkpoint),
-            "feature_pt": str(feature_pt) if feature_pt else "",
-            "feature_source": "feature_pt" if feature_pt else "fallback_aa_plddt_coord",
+            "feature_pt": str(feature_pt),
+            "feature_source": "training_compatible_feature_pt",
             "selected_chain": chain_id,
             "device": resolved_device,
             "n_nodes": pred_summary.get("count", 0),
@@ -561,6 +573,42 @@ def prepare_single_target_inputs(args: argparse.Namespace) -> PreparedInputs:
         if holoshift_ckpt is not None:
             holoshift = work_dir / f"{args.target_id}_holoshift_predict_openmm_relax.pdb"
             feature_pt = _path(args.holoshift_feature_pt)
+            if feature_pt is None:
+                esm_weights = _path(args.holoshift_esm_weights)
+                pca_path = _path(args.holoshift_pca_path)
+                if esm_weights is None or pca_path is None:
+                    raise ValueError(
+                        "HoloShift prediction requires --holoshift-feature-pt, or both "
+                        "--holoshift-esm-weights and --holoshift-pca-path to build training-compatible features."
+                    )
+                pae_path = _path(args.holoshift_pae_path)
+                if pae_path is None and args.raw_af2_uniprot and args.holoshift_download_pae:
+                    pae_path = _download_af2_pae(
+                        args.raw_af2_uniprot,
+                        work_dir / "downloads",
+                        reuse=args.reuse_prepared,
+                    )
+                    notes.append(f"Downloaded AF2 PAE for feature construction: {pae_path}")
+                feature_pt = _path(args.holoshift_feature_out) or work_dir / f"{args.target_id}_training_graph_features.pt"
+                if not args.reuse_prepared or not feature_pt.exists():
+                    feature_report = build_prediction_feature_graph(
+                        PredictionFeatureBuildConfig(
+                            pdb_file=raw_af2,
+                            output_pt=feature_pt,
+                            esm_weights=esm_weights,
+                            pca_path=pca_path,
+                            pae_path=pae_path,
+                            chain_id=args.moving_chain,
+                            device=None if args.holoshift_feature_device == "auto" else args.holoshift_feature_device,
+                            k=args.holoshift_k,
+                            require_pae=args.holoshift_require_pae,
+                        )
+                    )
+                    notes.append(
+                        "Built training-compatible HoloShift graph features: "
+                        f"{feature_pt}; schema={feature_report.get('schema_version')}; "
+                        f"pae_path={feature_report.get('pae_path') or 'none'}."
+                    )
             conformal_stats = _path(args.holoshift_conformal_stats)
             report = generate_holoshift_receptor(
                 input_pdb=raw_af2,
@@ -571,7 +619,6 @@ def prepare_single_target_inputs(args: argparse.Namespace) -> PreparedInputs:
                 chain_id=args.moving_chain,
                 k=args.holoshift_k,
                 device=args.holoshift_device,
-                allow_fallback_features=args.holoshift_allow_fallback_features,
                 conformal_stats=conformal_stats,
                 reject_threshold=args.holoshift_reject_threshold,
                 apply_inference_multiplier=args.holoshift_apply_inference_multiplier,
@@ -586,11 +633,6 @@ def prepare_single_target_inputs(args: argparse.Namespace) -> PreparedInputs:
                 f"{holoshift_ckpt}; feature_source={report.get('feature_source')}, "
                 f"mean|delta|={report.get('prediction_delta_norm', {}).get('mean', 0.0):.3f} A."
             )
-            if report.get("feature_source") == "fallback_aa_plddt_coord":
-                notes.append(
-                    "HoloShift Predict used debug fallback features because no --holoshift-feature-pt was supplied; "
-                    "use training-compatible graph features for a real benchmark."
-                )
         else:
             raise ValueError("Provide --holoshift-pdb or --holoshift-ckpt to build the HoloShift receptor.")
     elif args.align_crop_holoshift:
@@ -719,6 +761,28 @@ def write_four_way_reports(out_dir: Path, notes: list[str]) -> None:
         lines += [f"- {note}" for note in notes]
         lines.append("")
 
+    publishability = summary.get("publishability", {})
+    redocking = summary.get("redocking_sanity", {})
+    if publishability or redocking:
+        lines += ["## Scientific Validity"]
+        if publishability:
+            lines.append(f"- Pose-power claims allowed: {publishability.get('pose_power_claims_allowed')}")
+            lines.append(f"- Reason: {publishability.get('reason')}")
+        if redocking:
+            pass_rate = _fmt(redocking.get("pass_rate"), 3)
+            lines.append(
+                f"- True-holo redocking Top-{redocking.get('gate_topn')} pass rate: "
+                f"{pass_rate} ({redocking.get('n_passed')}/{redocking.get('n_targets')})"
+            )
+            failed = redocking.get("failed_targets") or []
+            if failed:
+                lines.append(f"- Redocking failed targets: {', '.join(failed)}")
+        lines += [
+            "- Primary endpoint: ligand heavy-atom pose RMSD success.",
+            "- Vina score is reported as auxiliary; lower score is not treated as pose correctness.",
+            ""
+        ]
+
     lines += ["## Aggregate", "", "| Structure | Top-1 success | Mean Top-1 RMSD | Top-3 | Top-5 | First hit rank |"]
     lines.append("|---|---:|---:|---:|---:|---:|")
     for row in summary_rows:
@@ -790,9 +854,40 @@ def parse_args() -> argparse.Namespace:
         help="Training-compatible graph feature .pt for HoloShift inference.",
     )
     p.add_argument(
-        "--holoshift-allow-fallback-features",
+        "--holoshift-feature-out",
+        default=None,
+        help="Where to write generated training-compatible HoloShift graph features when --holoshift-feature-pt is omitted.",
+    )
+    p.add_argument(
+        "--holoshift-esm-weights",
+        default=None,
+        help="ESM/ESMC weights used by the training feature pipeline.",
+    )
+    p.add_argument(
+        "--holoshift-pca-path",
+        default=None,
+        help="PCA model used by the training feature pipeline.",
+    )
+    p.add_argument(
+        "--holoshift-pae-path",
+        default=None,
+        help="Optional AF2 PAE JSON/NPY used for graph edge features.",
+    )
+    p.add_argument(
+        "--holoshift-download-pae",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Download AF2 PAE when --raw-af2-uniprot is provided and --holoshift-pae-path is omitted.",
+    )
+    p.add_argument(
+        "--holoshift-require-pae",
         action="store_true",
-        help="Use debug-only AA/pLDDT/coordinate features when --holoshift-feature-pt is unavailable.",
+        help="Fail feature construction if PAE cannot be loaded and aligned to the prediction residues.",
+    )
+    p.add_argument(
+        "--holoshift-feature-device",
+        default="auto",
+        help="Device for ESM feature construction; use auto/cpu/cuda.",
     )
     p.add_argument("--holoshift-conformal-stats", default=None)
     p.add_argument("--holoshift-reject-threshold", type=float, default=5.0)

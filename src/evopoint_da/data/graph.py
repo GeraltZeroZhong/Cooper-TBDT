@@ -6,6 +6,8 @@ import os
 import numpy as np
 import torch
 
+from evopoint_da.data.structure import parse_residue_id
+
 GVP_DEFAULT_NUM_RBF = 16
 GVP_DEFAULT_RBF_MAX = 20.0
 GVP_DEFAULT_PAE_SCALE = 30.0
@@ -13,10 +15,7 @@ GVP_DEFAULT_PAE_CONF_TAU = 8.0
 GVP_DEFAULT_SEQSEP_BINS = (1, 2, 4, 8, 16, 32, 64)
 
 
-def parse_pae_matrix(pae_path: str | None, n: int, *, strict: bool = False) -> np.ndarray:
-    def _zeros() -> np.ndarray:
-        return np.zeros((n, n), dtype=np.float32)
-
+def _read_pae_matrix(pae_path: str | None, *, strict: bool = False) -> np.ndarray | None:
     def _extract_matrix(raw_obj) -> np.ndarray | None:
         if isinstance(raw_obj, dict):
             if "predicted_aligned_error" in raw_obj:
@@ -34,12 +33,10 @@ def parse_pae_matrix(pae_path: str | None, n: int, *, strict: bool = False) -> n
             return np.asarray(raw_obj, dtype=np.float32)
         return np.asarray(raw_obj, dtype=np.float32)
 
-    if n < 0:
-        raise ValueError("n must be non-negative.")
     if pae_path is None or not os.path.exists(pae_path):
         if strict:
             raise FileNotFoundError(f"PAE file not found: {pae_path}")
-        return _zeros()
+        return None
 
     try:
         if pae_path.lower().endswith(".npy"):
@@ -54,11 +51,23 @@ def parse_pae_matrix(pae_path: str | None, n: int, *, strict: bool = False) -> n
     except Exception:
         if strict:
             raise
-        return _zeros()
+        return None
 
     if pae.ndim != 2:
         if strict:
             raise ValueError(f"PAE matrix must be 2D, got shape {pae.shape}.")
+        return None
+    return pae.astype(np.float32)
+
+
+def parse_pae_matrix(pae_path: str | None, n: int, *, strict: bool = False) -> np.ndarray:
+    def _zeros() -> np.ndarray:
+        return np.zeros((n, n), dtype=np.float32)
+
+    if n < 0:
+        raise ValueError("n must be non-negative.")
+    pae = _read_pae_matrix(pae_path, strict=strict)
+    if pae is None:
         return _zeros()
 
     h, w = int(pae.shape[0]), int(pae.shape[1])
@@ -68,6 +77,67 @@ def parse_pae_matrix(pae_path: str | None, n: int, *, strict: bool = False) -> n
         out[:hh, :ww] = pae[:hh, :ww]
         return out
     return pae.astype(np.float32)
+
+
+def parse_pae_matrix_for_residue_ids(
+    pae_path: str | None,
+    residue_ids: list[str],
+    *,
+    strict: bool = False,
+) -> np.ndarray:
+    n = len(residue_ids)
+    zeros = np.zeros((n, n), dtype=np.float32)
+    pae = _read_pae_matrix(pae_path, strict=strict)
+    if pae is None:
+        return zeros
+
+    h, w = int(pae.shape[0]), int(pae.shape[1])
+    if h == n and w == n:
+        return pae.astype(np.float32)
+
+    indices: list[int] = []
+    for rid in residue_ids:
+        _chain, resseq, _icode = parse_residue_id(str(rid))
+        indices.append(resseq - 1)
+
+    if indices and min(indices) >= 0 and max(indices) < h and max(indices) < w:
+        idx = np.asarray(indices, dtype=np.int64)
+        return pae[np.ix_(idx, idx)].astype(np.float32)
+
+    if strict:
+        raise ValueError(
+            f"Cannot align PAE matrix shape {pae.shape} to residue ids "
+            f"range={min(indices, default=0) + 1}-{max(indices, default=-1) + 1}."
+        )
+    out = zeros
+    hh, ww = min(n, h), min(n, w)
+    out[:hh, :ww] = pae[:hh, :ww]
+    return out
+
+
+def parse_pae_matrix_for_indices(
+    pae_path: str | None,
+    indices: list[int],
+    *,
+    strict: bool = False,
+) -> np.ndarray:
+    n = len(indices)
+    zeros = np.zeros((n, n), dtype=np.float32)
+    pae = _read_pae_matrix(pae_path, strict=strict)
+    if pae is None:
+        return zeros
+    h, w = int(pae.shape[0]), int(pae.shape[1])
+    if h == n and w == n:
+        return pae.astype(np.float32)
+    if indices and min(indices) >= 0 and max(indices) < h and max(indices) < w:
+        idx = np.asarray(indices, dtype=np.int64)
+        return pae[np.ix_(idx, idx)].astype(np.float32)
+    if strict:
+        raise ValueError(f"Cannot align PAE matrix shape {pae.shape} to index range {indices[:3]}...{indices[-3:]}.")
+    out = zeros
+    hh, ww = min(n, h), min(n, w)
+    out[:hh, :ww] = pae[:hh, :ww]
+    return out
 
 
 def build_knn_edges(

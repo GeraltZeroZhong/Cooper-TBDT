@@ -18,7 +18,12 @@ from evopoint_da.data.features import (
     PCAReducer,
     compute_structural_node_features,
 )
-from evopoint_da.data.graph import build_gvp_graph_features, build_knn_edges, parse_pae_matrix
+from evopoint_da.data.graph import (
+    build_gvp_graph_features,
+    build_knn_edges,
+    parse_pae_matrix_for_indices,
+    parse_pae_matrix_for_residue_ids,
+)
 from evopoint_da.data.paths import DEFAULT_PDB_UNIPROT_MAPPING
 
 PLDDT_SCALE_MAX = 100.0
@@ -171,7 +176,10 @@ def main() -> None:
         pae_path = _resolve_pae_path(args.pae_dir, uniprot_id, stem)
         if pae_path is None:
             skip_reasons["missing_pae_fallback_zero"] += 1
-        pae = parse_pae_matrix(pae_path, len(d["residue_ids"]))
+        if "af2_indices" in d:
+            pae = parse_pae_matrix_for_indices(pae_path, [int(i) for i in d["af2_indices"].tolist()])
+        else:
+            pae = parse_pae_matrix_for_residue_ids(pae_path, list(d["residue_ids"]))
         edge_index, edge_attr = build_knn_edges(d["af2_pos"].float(), k=args.k, pae=pae)
         node_v, edge_s, edge_v = build_gvp_graph_features(d["af2_pos"].float(), edge_index, edge_attr)
 

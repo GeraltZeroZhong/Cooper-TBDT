@@ -4,7 +4,6 @@ import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 
 from evopoint_da.pipeline.predict import (  # noqa: E402
-    _build_auto_features,
     _feature_edges_for_node_count,
     _load_prediction_features,
     _summarize_prediction_bins,

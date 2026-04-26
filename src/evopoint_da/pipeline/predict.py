@@ -19,34 +19,13 @@ import torch
 from Bio.PDB import PDBIO, PDBParser
 from torch_geometric.data import Data
 
-from evopoint_da.data.graph import build_knn_edges
-from evopoint_da.data.structure import StructureParser, select_chain
+from evopoint_da.data.structure import StructureParser, format_residue_id, select_chain
 from evopoint_da.models.module import EvoPointLitModule
+from evopoint_da.pipeline.build_prediction_features import PredictionFeatureBuildConfig, build_prediction_feature_graph
 from evopoint_da.utils.binning import build_bin_ranges as _build_bin_ranges
 
-AA_ORDER = [
-    "ALA",
-    "CYS",
-    "ASP",
-    "GLU",
-    "PHE",
-    "GLY",
-    "HIS",
-    "ILE",
-    "LYS",
-    "LEU",
-    "MET",
-    "ASN",
-    "PRO",
-    "GLN",
-    "ARG",
-    "SER",
-    "THR",
-    "VAL",
-    "TRP",
-    "TYR",
-]
-AA_TO_INDEX = {aa: i for i, aa in enumerate(AA_ORDER)}
+DEFAULT_ESM_WEIGHTS = "esmc_weights/esmc_600m_2024_12_v0.pth"
+DEFAULT_PCA_PATH = "data/pca_esmc_128.pkl"
 
 
 def _summarize_prediction_bins(pred_norm: np.ndarray, edges: list[float]) -> dict[str, dict]:
@@ -73,82 +52,158 @@ def _summarize_prediction_bins(pred_norm: np.ndarray, edges: list[float]) -> dic
     return bin_stats
 
 
-def _build_auto_features(parsed: dict, expected_in: int) -> torch.Tensor:
-    residue_names = parsed.get("residue_names", [])
-    plddts = np.asarray(parsed.get("plddts", []), dtype=np.float32)
-    coords = np.asarray(parsed.get("coords", []), dtype=np.float32)
-
-    n = int(coords.shape[0])
-    aa_onehot = np.zeros((n, len(AA_ORDER)), dtype=np.float32)
-    for i, resname in enumerate(residue_names[:n]):
-        idx = AA_TO_INDEX.get(str(resname).upper())
-        if idx is not None:
-            aa_onehot[i, idx] = 1.0
-
-    plddt_col = plddts[:n].reshape(n, 1) if plddts.size else np.zeros((n, 1), dtype=np.float32)
-    if plddt_col.max(initial=0.0) > 1.5:
-        plddt_col = plddt_col / 100.0
-
-    if n > 0:
-        coord_mean = coords.mean(axis=0, keepdims=True)
-        coord_std = coords.std(axis=0, keepdims=True) + 1e-6
-        coord_norm = (coords - coord_mean) / coord_std
-    else:
-        coord_norm = np.zeros((0, 3), dtype=np.float32)
-
-    base = np.concatenate([aa_onehot, plddt_col, coord_norm], axis=1)
-    if base.shape[1] < expected_in:
-        pad = np.zeros((n, expected_in - base.shape[1]), dtype=np.float32)
-        base = np.concatenate([base, pad], axis=1)
-    elif base.shape[1] > expected_in:
-        base = base[:, :expected_in]
-    return torch.from_numpy(base).float()
-
-
 def _load_prediction_features(
     args: Any,
     parsed: dict,
     pos: torch.Tensor,
     expected_in: int,
-) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-    if getattr(args, "feature_pt", None):
-        feat = torch.load(args.feature_pt, weights_only=True)
-        x = feat["x"].float()
-        edge_index = feat.get("edge_index", None)
-        edge_attr = feat.get("edge_attr", None)
-        if edge_index is not None:
-            edge_index = edge_index.long()
-        if edge_attr is not None:
-            edge_attr = edge_attr.float()
-        return x, edge_index, edge_attr
-
-    if not getattr(args, "allow_fallback_features", False):
+) -> dict[str, torch.Tensor | dict | None]:
+    feature_pt = getattr(args, "feature_pt", None)
+    if not feature_pt:
         raise ValueError(
-            "--feature_pt is required for normal inference. The automatic fallback "
-            "features are AA one-hot + pLDDT + normalized coordinates and do not "
-            "match the training feature pipeline. Pass a graph feature .pt built "
-            "with the same ESM/PCA + structural-feature pipeline used for training, "
-            "or add --allow_fallback_features for debugging only."
+            "--feature_pt is required. Build it with the training-compatible "
+            "ESM/PCA + structural graph feature pipeline before prediction."
         )
 
-    x = _build_auto_features(parsed, expected_in)
-    print(
-        "[warning] --allow_fallback_features enabled; using debug-only fallback "
-        f"features with dim={x.size(1)}. These do not match training features.",
-        file=sys.stderr,
+    feature_path = Path(feature_pt)
+    if not feature_path.exists():
+        raise FileNotFoundError(f"Feature .pt not found: {feature_path}")
+
+    feat = torch.load(feature_path, weights_only=True)
+    required = ("x", "edge_index", "edge_attr", "residue_ids")
+    missing = [key for key in required if key not in feat]
+    if missing:
+        raise ValueError(f"Feature .pt is missing required training graph fields: {missing}")
+
+    x = feat["x"].float()
+    edge_index = feat["edge_index"].long()
+    edge_attr = feat["edge_attr"].float()
+
+    parsed_residue_ids = list(parsed.get("residue_ids", []))
+    feature_residue_ids = [str(value) for value in feat.get("residue_ids", [])]
+    if feature_residue_ids != parsed_residue_ids:
+        raise ValueError(
+            "Feature residue_ids do not match the selected input chain. "
+            f"feature_n={len(feature_residue_ids)}, pdb_n={len(parsed_residue_ids)}. "
+            "Build features from the exact PDB/chain used for prediction."
+        )
+
+    feature_sequence = feat.get("sequence", None)
+    parsed_sequence = str(parsed.get("sequence", ""))
+    if feature_sequence is not None and str(feature_sequence) != parsed_sequence:
+        raise ValueError("Feature sequence does not match the selected input chain sequence.")
+
+    if x.size(0) != len(pos):
+        raise ValueError(f"Feature length ({x.size(0)}) != selected chain length ({len(pos)}).")
+    if x.size(1) != expected_in:
+        raise ValueError(f"Feature dim drift: input feature_dim={x.size(1)} but checkpoint expects in_channels={expected_in}")
+
+    edge_index, edge_attr = _feature_edges_for_node_count(edge_index, edge_attr, len(pos))
+    if edge_index is None or edge_attr is None:
+        raise ValueError("Training graph feature file must include non-null edge_index and edge_attr.")
+
+    payload: dict[str, torch.Tensor | dict | None] = {
+        "x": x,
+        "edge_index": edge_index,
+        "edge_attr": edge_attr,
+        "node_v": None,
+        "edge_s": None,
+        "edge_v": None,
+        "plddt": feat.get("plddt", None),
+        "metadata": feat.get("metadata", {}),
+    }
+
+    feature_pos = feat.get("pos", None)
+    pos_matches = False
+    if feature_pos is not None:
+        feature_pos = feature_pos.float()
+        if feature_pos.shape == pos.shape:
+            max_delta = torch.linalg.vector_norm(feature_pos - pos, dim=-1).max().item() if pos.numel() else 0.0
+            pos_matches = max_delta <= float(getattr(args, "feature_pos_tolerance", 1e-3))
+
+    if pos_matches:
+        for key in ("node_v", "edge_s", "edge_v"):
+            value = feat.get(key, None)
+            if value is not None:
+                payload[key] = value.float()
+    elif any(feat.get(key, None) is not None for key in ("node_v", "edge_s", "edge_v")):
+        print(
+            "[info] Feature pos differs from input PDB coordinates; rebuilding GVP vector features "
+            "from the current PDB frame at model forward time.",
+            file=sys.stderr,
+        )
+    return payload
+
+
+def _path_or_none(value: str | os.PathLike | None) -> Path | None:
+    if value is None or str(value).strip() == "":
+        return None
+    return Path(value)
+
+
+def _resolve_feature_pt_path(args: Any) -> Path:
+    feature_pt = _path_or_none(getattr(args, "feature_pt", None))
+    if feature_pt is not None:
+        return feature_pt
+
+    feature_out = _path_or_none(getattr(args, "feature_out", None))
+    if feature_out is not None:
+        return feature_out
+
+    pdb_stem = Path(args.pdb_file).stem
+    report_json = _path_or_none(getattr(args, "report_json", None))
+    output_pdb = _path_or_none(getattr(args, "output_pdb", None))
+    if report_json is not None:
+        out_dir = report_json.parent
+    elif output_pdb is not None:
+        out_dir = output_pdb.parent
+    else:
+        out_dir = Path("artifacts/prediction_features")
+    return out_dir / f"{pdb_stem}_training_graph_features.pt"
+
+
+def _ensure_prediction_feature_pt(args: Any, selected_chain_id: str) -> dict[str, Any] | None:
+    """Resolve or build the strict training-compatible feature_pt for prediction."""
+    feature_pt = _resolve_feature_pt_path(args)
+    rebuild = bool(getattr(args, "rebuild_feature_pt", False))
+    if feature_pt.exists() and not rebuild:
+        args.feature_pt = str(feature_pt)
+        return None
+
+    esm_weights = _path_or_none(getattr(args, "esm_weights", DEFAULT_ESM_WEIGHTS))
+    pca_path = _path_or_none(getattr(args, "pca_path", DEFAULT_PCA_PATH))
+    missing_args = []
+    if esm_weights is None:
+        missing_args.append("--esm_weights")
+    if pca_path is None:
+        missing_args.append("--pca_path")
+    if missing_args:
+        raise ValueError(
+            f"{feature_pt} does not exist and automatic feature generation is missing "
+            f"{', '.join(missing_args)}. Provide --feature_pt or the training ESM/PCA inputs."
+        )
+
+    pae_path = _path_or_none(getattr(args, "pae_path", None))
+    feature_device = getattr(args, "feature_device", "auto")
+    report = build_prediction_feature_graph(
+        PredictionFeatureBuildConfig(
+            pdb_file=Path(args.pdb_file),
+            output_pt=feature_pt,
+            esm_weights=esm_weights,
+            pca_path=pca_path,
+            pae_path=pae_path,
+            chain_id=selected_chain_id,
+            device=None if feature_device in (None, "", "auto") else str(feature_device),
+            pca_dim=int(getattr(args, "feature_pca_dim", 128)),
+            k=int(getattr(args, "k", 16)),
+            contact_radius=float(getattr(args, "feature_contact_radius", 10.0)),
+            surface_sasa_threshold=float(getattr(args, "feature_surface_sasa_threshold", 1.0)),
+            require_pae=bool(getattr(args, "require_pae", False)),
+        )
     )
-    save_auto_feature_pt = getattr(args, "save_auto_feature_pt", None)
-    if save_auto_feature_pt:
-        payload = {
-            "x": x,
-            "pos": pos,
-            "plddt": torch.as_tensor(parsed.get("plddts", []), dtype=torch.float32).unsqueeze(1),
-            "residue_ids": parsed.get("residue_ids", []),
-            "sequence": parsed.get("sequence", ""),
-        }
-        torch.save(payload, save_auto_feature_pt)
-        print(f"[info] Auto-built fallback features saved to: {save_auto_feature_pt}")
-    return x, None, None
+    args.feature_pt = str(feature_pt)
+    print(f"[features] Built training-compatible feature_pt: {feature_pt}")
+    return report
 
 
 def _feature_edges_for_node_count(
@@ -169,8 +224,11 @@ def _feature_edges_for_node_count(
         return edge_index.contiguous(), edge_attr.contiguous()
     valid = (edge_index[0] >= 0) & (edge_index[1] >= 0) & (edge_index[0] < n) & (edge_index[1] < n)
     if not bool(valid.all()):
-        edge_index = edge_index[:, valid]
-        edge_attr = edge_attr[valid]
+        bad = int((~valid).sum().item())
+        raise ValueError(
+            f"Feature edge_index contains {bad} edges outside the selected node range 0..{n - 1}. "
+            "Build features from the exact PDB/chain used for prediction."
+        )
     return edge_index.contiguous(), edge_attr.contiguous()
 
 
@@ -204,11 +262,18 @@ def _build_prediction_report(
         "input": {
             "pdb_file": args.pdb_file,
             "feature_pt": getattr(args, "feature_pt", None),
-            "allow_fallback_features": bool(getattr(args, "allow_fallback_features", False)),
             "conformal_stats": getattr(args, "conformal_stats", None),
             "selected_chain": selected_chain_id,
             "k": int(args.k),
             "device": args.device,
+        },
+        "task_definition": {
+            "name": "ligand_agnostic_ca_displacement",
+            "description": (
+                "Predicts C-alpha displacement for a selected protein chain from AF2-derived, "
+                "training-compatible ESM/PCA + structural graph features. It is not a ligand-aware "
+                "side-chain repacking or holo pocket reconstruction model."
+            ),
         },
         "model": {
             "ckpt_path": args.ckpt_path,
@@ -227,7 +292,6 @@ def _build_prediction_report(
         "preview": {"safe_center_first5": safe_center[:5].tolist()},
         "artifacts": {
             "output_pdb": getattr(args, "output_pdb", None),
-            "save_auto_feature_pt": getattr(args, "save_auto_feature_pt", None),
         },
     }
 
@@ -276,23 +340,19 @@ def predict_displacement(args: Any) -> tuple[dict, str, np.ndarray, np.ndarray, 
     model.eval().to(args.device)
     expected_in = int(model.hparams.in_channels)
 
-    x, feature_edge_index, feature_edge_attr = _load_prediction_features(args, parsed, pos, expected_in)
-    if x.size(0) != len(pos):
-        n = min(x.size(0), len(pos))
-        print(
-            f"[warning] Feature length ({x.size(0)}) != selected chain length ({len(pos)}); truncating both to {n}.",
-            file=sys.stderr,
-        )
-        x = x[:n]
-        pos = pos[:n]
-
-    edge_index, edge_attr = _feature_edges_for_node_count(feature_edge_index, feature_edge_attr, len(pos))
-    if edge_index is None or edge_attr is None:
-        edge_index, edge_attr = build_knn_edges(pos, k=args.k)
-    data = Data(x=x, pos=pos, edge_index=edge_index, edge_attr=edge_attr).to(args.device)
-
-    if x.size(1) != expected_in:
-        raise ValueError(f"Feature dim drift: input feature_dim={x.size(1)} but checkpoint expects in_channels={expected_in}")
+    feature_build_report = _ensure_prediction_feature_pt(args, selected_chain_id)
+    feature_payload = _load_prediction_features(args, parsed, pos, expected_in)
+    data_kwargs = {
+        "x": feature_payload["x"],
+        "pos": pos,
+        "edge_index": feature_payload["edge_index"],
+        "edge_attr": feature_payload["edge_attr"],
+    }
+    for optional_key in ("node_v", "edge_s", "edge_v", "plddt"):
+        value = feature_payload.get(optional_key)
+        if isinstance(value, torch.Tensor):
+            data_kwargs[optional_key] = value
+    data = Data(**data_kwargs).to(args.device)
 
     qhat = _load_qhat(getattr(args, "conformal_stats", None))
     with torch.no_grad():
@@ -322,11 +382,14 @@ def predict_displacement(args: Any) -> tuple[dict, str, np.ndarray, np.ndarray, 
         qhat=qhat,
         reject=reject,
         expected_in=expected_in,
-        observed_in=x.size(1),
+        observed_in=feature_payload["x"].size(1),
         pred_norm=pred_norm,
         safe_center=safe_center,
         disp_bin_edges=disp_bin_edges,
     )
+    report["feature_metadata"] = feature_payload.get("metadata") or {}
+    if feature_build_report is not None:
+        report["feature_build_report"] = feature_build_report
     return report, selected_chain_id, source_center, safe_center, parsed
 
 
@@ -340,25 +403,69 @@ def _iter_chain_residues(structure, chain_id: str) -> Iterable:
     raise ValueError(f"Chain {chain_id} not found in {structure.id}")
 
 
-def _write_guardrailed_pdb(input_pdb: str, chain_id: str, source_ca: np.ndarray, target_ca: np.ndarray, out_pdb: str) -> None:
+def _write_guardrailed_pdb(
+    input_pdb: str,
+    chain_id: str,
+    residue_ids: list[str],
+    source_ca: np.ndarray,
+    target_ca: np.ndarray,
+    out_pdb: str,
+    *,
+    ca_tolerance: float = 1e-3,
+) -> dict[str, Any]:
     parser = PDBParser(QUIET=True)
     structure = parser.get_structure("input", input_pdb)
 
-    residues = list(_iter_chain_residues(structure, chain_id))
-    if len(residues) < len(source_ca):
+    residues_by_id = {}
+    for residue in _iter_chain_residues(structure, chain_id):
+        rid = format_residue_id(chain_id, int(residue.id[1]), str(residue.id[2]).strip())
+        residues_by_id[rid] = residue
+
+    if not (len(residue_ids) == len(source_ca) == len(target_ca)):
         raise ValueError(
-            f"Selected chain has fewer residues in full-atom PDB ({len(residues)}) than CA trace ({len(source_ca)})"
+            "residue_ids, source_ca, and target_ca must have identical lengths; "
+            f"got {len(residue_ids)}, {len(source_ca)}, {len(target_ca)}."
         )
 
-    for residue, src_ca, dst_ca in zip(residues, source_ca, target_ca, strict=False):
+    max_ca_delta = 0.0
+    shifted_residues = 0
+    shifted_atoms = 0
+    for rid, src_ca, dst_ca in zip(residue_ids, source_ca, target_ca, strict=True):
+        residue = residues_by_id.get(rid)
+        if residue is None:
+            raise ValueError(f"Residue {rid!r} from the prediction trace is missing in full-atom chain {chain_id}.")
+        if "CA" not in residue:
+            raise ValueError(f"Residue {rid!r} has no CA atom in full-atom chain {chain_id}.")
+        ca_delta = float(np.linalg.norm(np.asarray(residue["CA"].coord, dtype=np.float32) - src_ca))
+        max_ca_delta = max(max_ca_delta, ca_delta)
+        if ca_delta > ca_tolerance:
+            raise ValueError(
+                f"Residue {rid!r} CA coordinate differs from parsed source trace by {ca_delta:.6f} A; "
+                "refusing to apply residue shifts with ambiguous alignment."
+            )
         shift = dst_ca - src_ca
         for atom in residue.get_atoms():
             atom.coord = atom.coord + shift
+            shifted_atoms += 1
+        shifted_residues += 1
 
     os.makedirs(os.path.dirname(out_pdb) or ".", exist_ok=True)
     io = PDBIO()
     io.set_structure(structure)
     io.save(out_pdb)
+    return {
+        "method": "ca_guided_rigid_residue_translation",
+        "warning": (
+            "All atoms in each residue are translated by the predicted CA displacement. "
+            "Side-chain rotamers are not repacked; use restrained minimization and docking redocking gates "
+            "before interpreting this as a receptor model."
+        ),
+        "chain_id": chain_id,
+        "shifted_residues": shifted_residues,
+        "shifted_atoms": shifted_atoms,
+        "max_source_ca_alignment_error": max_ca_delta,
+        "ca_tolerance": ca_tolerance,
+    }
 
 
 def _run_openmm_restrained_minimization(
@@ -531,17 +638,25 @@ print(json.dumps({
 def _run_relax_after_prediction(
     args: Any,
     selected_chain_id: str,
+    residue_ids: list[str],
     source_center: np.ndarray,
     safe_center: np.ndarray,
     full_atom_pdb: str,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     output_dir = Path(args.relax_output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     if not getattr(args, "run_relax", True):
         return {}
 
     guardrailed_pdb = output_dir / "01_guardrailed_backbone.pdb"
-    _write_guardrailed_pdb(args.pdb_file, selected_chain_id, source_center, safe_center, str(guardrailed_pdb))
+    displacement_write = _write_guardrailed_pdb(
+        args.pdb_file,
+        selected_chain_id,
+        residue_ids,
+        source_center,
+        safe_center,
+        str(guardrailed_pdb),
+    )
     minimized_pdb = output_dir / "02_openmm_minimized.pdb"
     openmm_input = str(guardrailed_pdb)
 
@@ -568,6 +683,7 @@ def _run_relax_after_prediction(
         "guardrailed_pdb": str(guardrailed_pdb),
         "minimized_pdb": str(minimized_pdb),
         "backend": "openmm",
+        "displacement_write": displacement_write,
         **external,
     }
     if full_atom_pdb:
@@ -577,6 +693,7 @@ def _run_relax_after_prediction(
 
 def predict_and_relax(args: Any) -> dict:
     report, selected_chain_id, source_center, safe_center, parsed = predict_displacement(args)
+    residue_ids = list(parsed.get("residue_ids", []))
     _print_prediction_report(report)
 
     if getattr(args, "report_json", None):
@@ -586,8 +703,16 @@ def predict_and_relax(args: Any) -> dict:
         print(f"Detailed report JSON written to: {args.report_json}")
 
     if getattr(args, "output_pdb", None):
-        _write_guardrailed_pdb(args.pdb_file, selected_chain_id, source_center, safe_center, args.output_pdb)
+        displacement_write = _write_guardrailed_pdb(
+            args.pdb_file,
+            selected_chain_id,
+            residue_ids,
+            source_center,
+            safe_center,
+            args.output_pdb,
+        )
         report["artifacts"]["output_pdb"] = args.output_pdb
+        report["artifacts"]["displacement_write"] = displacement_write
         print(f"Predicted full-atom PDB written to: {args.output_pdb}")
 
     if getattr(args, "run_relax", True):
@@ -595,6 +720,7 @@ def predict_and_relax(args: Any) -> dict:
         relax_artifacts = _run_relax_after_prediction(
             args=args,
             selected_chain_id=selected_chain_id,
+            residue_ids=residue_ids,
             source_center=source_center,
             safe_center=safe_center,
             full_atom_pdb=full_atom_pdb,
@@ -618,19 +744,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--feature_pt",
         default=None,
         help=(
-            "Prepared graph feature file with training-compatible x tensor. "
-            "Required unless --allow_fallback_features is set for debugging."
+            "Prepared graph feature file. If omitted or missing, predict.py builds it with "
+            "the training-compatible ESM/PCA + structural graph feature pipeline."
         ),
     )
     p.add_argument(
-        "--allow_fallback_features",
-        action="store_true",
-        help="Allow debug-only AA/pLDDT/coordinate fallback features when --feature_pt is omitted.",
-    )
-    p.add_argument(
-        "--save_auto_feature_pt",
+        "--feature_out",
         default=None,
-        help="Optional path to save debug-only auto-built fallback features (.pt).",
+        help=(
+            "Output path for auto-generated feature_pt when --feature_pt is omitted. "
+            "Defaults next to --report_json/--output_pdb, or artifacts/prediction_features/."
+        ),
+    )
+    p.add_argument("--rebuild_feature_pt", action="store_true", help="Regenerate feature_pt even if it already exists.")
+    p.add_argument("--esm_weights", default=DEFAULT_ESM_WEIGHTS, help="ESMC weights for automatic feature generation.")
+    p.add_argument("--pca_path", default=DEFAULT_PCA_PATH, help="Training PCA model for automatic feature generation.")
+    p.add_argument("--pae_path", default=None, help="Optional AF2 PAE JSON/NPY for automatic graph edge features.")
+    p.add_argument("--require_pae", action="store_true", help="Fail automatic feature generation if PAE is missing.")
+    p.add_argument("--feature_device", default="auto", help="Device for ESM feature construction; use auto/cpu/cuda.")
+    p.add_argument("--feature_pca_dim", type=int, default=128)
+    p.add_argument("--feature_contact_radius", type=float, default=10.0)
+    p.add_argument("--feature_surface_sasa_threshold", type=float, default=1.0)
+    p.add_argument(
+        "--feature_pos_tolerance",
+        type=float,
+        default=1e-3,
+        help="Direct-coordinate tolerance for reusing precomputed GVP vector features from feature_pt.",
     )
     p.add_argument("--ckpt_path", required=True)
     p.add_argument(

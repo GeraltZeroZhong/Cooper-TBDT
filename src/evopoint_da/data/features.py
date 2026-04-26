@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import pickle
+from tempfile import NamedTemporaryFile
 from typing import Dict, List, Optional
 
 import freesasa
@@ -132,6 +133,7 @@ def compute_structural_node_features(
     residue_ids: List[str],
     neighbor_radius: float = 10.0,
     surface_sasa_threshold: float = 1.0,
+    require_dssp: bool = False,
 ) -> Dict[str, torch.Tensor]:
     """Compute per-residue geometric/structural features aligned to residue_ids."""
     parser = PDBParser(QUIET=True) if structure_path.lower().endswith((".pdb", ".ent")) else MMCIFParser(QUIET=True)
@@ -254,8 +256,27 @@ def compute_structural_node_features(
         dihed[i, 4] = np.sin(omega)
         dihed[i, 5] = np.cos(omega)
 
+    dssp_tmp_path: Optional[str] = None
     try:
-        dssp = DSSP(model, structure_path, dssp="mkdssp")
+        lower_path = structure_path.lower()
+        if lower_path.endswith((".pdb", ".ent")):
+            dssp_file_type = "PDB"
+            dssp_input_path = structure_path
+            with open(structure_path, "r", encoding="utf-8") as handle:
+                first_line = handle.readline()
+            if not first_line.startswith("HEADER"):
+                with NamedTemporaryFile("w", suffix=".pdb", delete=False, encoding="utf-8") as tmp:
+                    tmp.write("HEADER    HOLOSHIFT DSSP INPUT\n")
+                    with open(structure_path, "r", encoding="utf-8") as src:
+                        for line in src:
+                            tmp.write(line)
+                    dssp_tmp_path = tmp.name
+                dssp_input_path = dssp_tmp_path
+        else:
+            dssp_file_type = "MMCIF"
+            dssp_input_path = structure_path
+
+        dssp = DSSP(model, dssp_input_path, dssp="mkdssp", file_type=dssp_file_type)
         for dssp_key in dssp.keys():
             chain_id = dssp_key[0]
             resseq = dssp_key[1][1]
@@ -273,7 +294,16 @@ def compute_structural_node_features(
             else:
                 dssp_3[idx, 2] = 1.0
     except Exception as e:
-        print(f"[warning] DSSP unavailable for {structure_path}: {e}. Falling back to coil state.")
+        message = f"DSSP unavailable for {structure_path}: {e}."
+        if require_dssp:
+            raise RuntimeError(message) from e
+        print(f"[warning] {message} Falling back to coil state.")
+    finally:
+        if dssp_tmp_path:
+            try:
+                os.remove(dssp_tmp_path)
+            except OSError:
+                pass
 
     return {
         "sasa": torch.from_numpy(sasa),

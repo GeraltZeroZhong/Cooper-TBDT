@@ -106,6 +106,8 @@ def main() -> None:
             "af2_pos": torch.tensor(af2_aligned),
             "holo_pos": torch.tensor(af2_aligned + delta_r),
             "y_delta": torch.tensor(delta_r),
+            "af2_indices": torch.tensor(af2_idx, dtype=torch.long),
+            "holo_indices": torch.tensor(_holo_idx, dtype=torch.long),
             "plddt": torch.tensor(selected_af2_data["plddts"][af2_idx]).unsqueeze(1),
             "sequence": "".join(selected_af2_data["sequence"][i] for i in af2_idx.tolist()),
         }
