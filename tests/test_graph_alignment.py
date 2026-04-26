@@ -9,7 +9,13 @@ import numpy as np
 import torch
 
 from evopoint_da.data.alignment import apply_transform, kabsch_rotation
-from evopoint_da.data.graph import build_knn_edges, parse_pae_matrix
+from evopoint_da.data.graph import (
+    build_ca_node_vectors,
+    build_gvp_edge_features,
+    build_knn_edges,
+    gvp_edge_scalar_dim,
+    parse_pae_matrix,
+)
 
 
 class GraphAndAlignmentTests(unittest.TestCase):
@@ -55,6 +61,27 @@ class GraphAndAlignmentTests(unittest.TestCase):
             bad.write_text(json.dumps({"not_pae": []}), encoding="utf-8")
             with self.assertRaises(ValueError):
                 parse_pae_matrix(str(bad), 3, strict=True)
+
+    def test_gvp_feature_helpers_build_expected_shapes(self) -> None:
+        pos = torch.tensor(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [2.0, 1.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        edge_index, edge_attr = build_knn_edges(pos, k=2)
+
+        node_v = build_ca_node_vectors(pos)
+        edge_s, edge_v = build_gvp_edge_features(pos, edge_index, edge_attr)
+
+        self.assertEqual(tuple(node_v.shape), (4, 3, 3))
+        self.assertEqual(tuple(edge_s.shape), (edge_index.size(1), gvp_edge_scalar_dim()))
+        self.assertEqual(tuple(edge_v.shape), (edge_index.size(1), 1, 3))
+        torch.testing.assert_close(node_v[1, 0], torch.tensor([1.0, 0.0, 0.0]))
+        torch.testing.assert_close(torch.linalg.vector_norm(edge_v.squeeze(1), dim=-1), torch.ones(edge_index.size(1)))
 
 
 if __name__ == "__main__":

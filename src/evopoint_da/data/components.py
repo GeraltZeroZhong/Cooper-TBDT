@@ -12,7 +12,13 @@ from .features import (
     compute_sasa_with_freesasa,
     compute_structural_node_features,
 )
-from .graph import build_knn_edges, parse_pae_matrix
+from .graph import (
+    build_ca_node_vectors,
+    build_gvp_edge_features,
+    build_gvp_graph_features,
+    build_knn_edges,
+    parse_pae_matrix,
+)
 from .structure import STANDARD_AA, StructureParser, format_residue_id, parse_residue_id, select_chain
 
 __all__ = [
@@ -22,6 +28,9 @@ __all__ = [
     "STANDARD_AA",
     "StructureParser",
     "apply_transform",
+    "build_ca_node_vectors",
+    "build_gvp_edge_features",
+    "build_gvp_graph_features",
     "build_knn_edges",
     "compute_displacement_target",
     "compute_sasa_with_freesasa",

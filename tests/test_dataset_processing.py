@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 import torch
+from torch_geometric.loader import DataLoader
 
 from evopoint_da.data.dataset import EvoPointDataset, build_split_file_lists
 
@@ -87,6 +88,33 @@ class DatasetProcessingTests(unittest.TestCase):
             ds = EvoPointDataset(str(root), split="all")
             self.assertAlmostEqual(float(ds[0].plddt[0, 0]), 0.8, places=6)
             self.assertAlmostEqual(float(ds[0].plddt[1, 0]), 0.4, places=6)
+
+    def test_dataset_derives_gvp_features_for_legacy_graph(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            edge_index = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+            torch.save(
+                {
+                    "x": torch.ones((3, 4), dtype=torch.float32),
+                    "pos": torch.tensor(
+                        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+                        dtype=torch.float32,
+                    ),
+                    "y_delta": torch.zeros((3, 3), dtype=torch.float32),
+                    "edge_index": edge_index,
+                    "edge_attr": torch.tensor([[1.0, 2.0], [1.0, 4.0]], dtype=torch.float32),
+                },
+                root / "sample.pt",
+            )
+
+            ds = EvoPointDataset(str(root), split="all")
+            sample = ds[0]
+            self.assertEqual(tuple(sample.node_v.shape), (3, 3, 3))
+            self.assertEqual(sample.edge_s.size(0), edge_index.size(1))
+            self.assertEqual(tuple(sample.edge_v.shape), (edge_index.size(1), 1, 3))
+            batch = next(iter(DataLoader(ds, batch_size=1)))
+            self.assertEqual(tuple(batch.node_v.shape), (3, 3, 3))
+            self.assertEqual(tuple(batch.edge_v.shape), (edge_index.size(1), 1, 3))
 
 
 if __name__ == "__main__":
