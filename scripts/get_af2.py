@@ -76,31 +76,47 @@ def download_pae(uniprot_id, output_dir):
         safe_print(f"[-] PAE 下载异常 {uniprot_id}: {e}")
         return False
 
+def download_af2_model(uniprot_id, output_dir, version=6, filename=None, timeout=30):
+    """下载 AlphaFold 结构，返回保存路径或 None。
+
+    This importable helper is intentionally small so other workflows can reuse
+    the same AlphaFold URL/version logic without running this script's dataset
+    bootstrap ``main()``.
+    """
+    url = f"https://alphafold.ebi.ac.uk/files/AF-{uniprot_id}-F1-model_v{int(version)}.pdb"
+    if filename is None:
+        filename = f"AF-{uniprot_id}-F1-model_v{int(version)}.pdb"
+    output_path = os.path.join(output_dir, filename)
+
+    if os.path.exists(output_path):
+        safe_print(f"[*] {uniprot_id} (PDB) 已存在，跳过。")
+        return output_path
+
+    os.makedirs(output_dir, exist_ok=True)
+    try:
+        response = requests.get(url, timeout=timeout)
+        if response.status_code == 200:
+            with open(output_path, 'wb') as f:
+                f.write(response.content)
+            safe_print(f"[+] PDB 下载成功: {output_path}")
+            return output_path
+        if response.status_code != 404:
+            safe_print(f"[-] PDB 下载错误 {uniprot_id}: HTTP {response.status_code}")
+    except Exception as e:
+        safe_print(f"[-] PDB 下载异常 {uniprot_id}: {e}")
+    return None
+
+
 def download_af2(uniprot_id, output_dir):
     """下载 AlphaFold 结构 (v6)，返回 True/False"""
-    url = f"https://alphafold.ebi.ac.uk/files/AF-{uniprot_id}-F1-model_v6.pdb"
-    filename = os.path.join(output_dir, f"AF-{uniprot_id}.pdb")
+    filename = f"AF-{uniprot_id}.pdb"
 
     # 如果文件已存在，也视为成功，直接返回 True
-    if os.path.exists(filename):
+    if os.path.exists(os.path.join(output_dir, filename)):
         safe_print(f"[*] {uniprot_id} (PDB) 已存在，跳过。")
         return True
 
-    try:
-        response = requests.get(url, timeout=30)
-        if response.status_code == 200:
-            with open(filename, 'wb') as f:
-                f.write(response.content)
-            safe_print(f"[+] PDB 下载成功: {filename}")
-            return True
-        elif response.status_code == 404:
-            return False
-        else:
-            safe_print(f"[-] PDB 下载错误 {uniprot_id}: HTTP {response.status_code}")
-            return False
-    except Exception as e:
-        safe_print(f"[-] PDB 下载异常 {uniprot_id}: {e}")
-        return False
+    return download_af2_model(uniprot_id, output_dir, version=6, filename=filename) is not None
 
 def process_single_pdb(pdb_file):
     """处理单个 PDB 文件并记录映射"""

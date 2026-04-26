@@ -24,7 +24,7 @@ PIPELINE_STEPS: list[StepSpec] = [
     StepSpec("build_features", "evopoint_da.pipeline.build_features_with_sasa"),
     StepSpec("train", "train"),
     StepSpec("calibrate", "evopoint_da.pipeline.eval_run"),
-    StepSpec("relax", "evopoint_da.pipeline.run_faspr_openmm_relax"),
+    StepSpec("predict", "evopoint_da.pipeline.predict"),
 ]
 
 
