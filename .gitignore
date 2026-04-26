@@ -1,0 +1,23 @@
+# Local data and model weights
+data/
+esmc_weights/
+
+# Training and evaluation outputs
+checkpoints/
+val_metrics/
+logs/
+outputs/
+artifacts/
+wandb/
+
+# Python/cache artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS/editor download metadata
+*:Zone.Identifier
+.DS_Store
