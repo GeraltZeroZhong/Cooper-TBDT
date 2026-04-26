@@ -10,6 +10,8 @@ Purpose:
 
 import argparse
 import json
+import os
+import shutil
 import subprocess
 import sys
 from typing import Iterable
@@ -20,17 +22,9 @@ import torch
 from Bio.PDB import PDBIO, PDBParser
 from torch_geometric.data import Data
 
-from evopoint_da.data.components import StructureParser, build_knn_edges
+from evopoint_da.data.graph import build_knn_edges
+from evopoint_da.data.structure import StructureParser, select_chain
 from evopoint_da.models.module import EvoPointLitModule
-
-
-def _select_chain(chains: dict, chain_id: str | None):
-    if chain_id is not None:
-        if chain_id not in chains:
-            raise ValueError(f"Requested chain_id={chain_id} not found. Available: {list(chains.keys())}")
-        return chain_id, chains[chain_id]
-    best_id = max(chains.keys(), key=lambda cid: len(chains[cid]["coords"]))
-    return best_id, chains[best_id]
 
 
 def parse_args() -> argparse.Namespace:
@@ -83,9 +77,9 @@ def _predict_displacement(
     if not parsed_chains:
         raise ValueError("Failed to parse input structure")
 
-    selected_chain_id, parsed = _select_chain(parsed_chains, args.chain_id)
+    selected_chain_id, parsed = select_chain(parsed_chains, args.chain_id)
 
-    feat = torch.load(args.feature_pt, weights_only=False)
+    feat = torch.load(args.feature_pt, weights_only=True)
     pos = torch.tensor(parsed["coords"], dtype=torch.float32)
     x = feat["x"].float()
 
@@ -166,7 +160,12 @@ def _write_guardrailed_pdb(input_pdb: str, chain_id: str, source_ca: np.ndarray,
 
 
 def _run_faspr(faspr_bin: str, input_pdb: str, output_pdb: str, extra_args: list[str]) -> None:
-    cmd = [faspr_bin, "-i", input_pdb, "-o", output_pdb, *extra_args]
+    resolved = faspr_bin if os.path.isabs(faspr_bin) else shutil.which(faspr_bin)
+    if resolved is None:
+        raise FileNotFoundError(f"FASPR executable not found: {faspr_bin!r}")
+    if not os.access(resolved, os.X_OK):
+        raise PermissionError(f"FASPR path is not executable: {resolved}")
+    cmd = [resolved, "-i", input_pdb, "-o", output_pdb, *extra_args]
     subprocess.run(cmd, check=True)
 
 

@@ -5,6 +5,9 @@ num_workers: 0
 calib_batch_size: 1
 split_seed: 42
 fallback_num_features: 144
+allow_empty_fallback: false
+allow_length_truncation: false
+plddt_feature_index: 128
 split_ranges:
   train: [0.0, 0.7]
   val: [0.7, 0.8]

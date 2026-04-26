@@ -1,5 +1,7 @@
 # Local data and model weights
-data/
+data/*
+!data/metadata/
+!data/metadata/pdb_uniprot_mapping.json
 esmc_weights/
 
 # Training and evaluation outputs

@@ -13,13 +13,13 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from evopoint_da.data.components import (
+from evopoint_da.data.features import (
     ESMFeatureExtractor,
     PCAReducer,
-    build_knn_edges,
     compute_structural_node_features,
-    parse_pae_matrix,
 )
+from evopoint_da.data.graph import build_knn_edges, parse_pae_matrix
+from evopoint_da.data.paths import DEFAULT_PDB_UNIPROT_MAPPING
 
 PLDDT_SCALE_MAX = 100.0
 SASA_SCALE_MAX = 250.0
@@ -36,7 +36,7 @@ def get_args() -> argparse.Namespace:
     p.add_argument("--fit_pca", action="store_true")
     p.add_argument("--pae_dir", default="data/raw_af2")
     p.add_argument("--af2_structure_dir", default="data/raw_af2")
-    p.add_argument("--mapping_file", default="pdb_uniprot_mapping.json")
+    p.add_argument("--mapping_file", default=DEFAULT_PDB_UNIPROT_MAPPING)
     p.add_argument("--contact_radius", type=float, default=10.0)
     p.add_argument("--surface_sasa_threshold", type=float, default=1.0)
     p.add_argument("--report_path", default="artifacts/build_features_report.json")
@@ -94,7 +94,7 @@ def main() -> None:
     if args.fit_pca:
         buf = []
         for f in tqdm(files, desc="Fitting PCA", unit="file"):
-            d = torch.load(f, weights_only=False)
+            d = torch.load(f, weights_only=True)
             buf.append(extractor.extract_residue_embeddings(d["sequence"]))
         pca.fit(buf)
         pca.save(args.pca_path)
@@ -109,7 +109,7 @@ def main() -> None:
     plddt_means: list[float] = []
     processed_count = 0
     for f in tqdm(files, desc="Building graph features", unit="file"):
-        d = torch.load(f, weights_only=False)
+        d = torch.load(f, weights_only=True)
         stem = d["pair_id"]
         emb = extractor.extract_residue_embeddings(d["sequence"])
         x_esm = pca.transform(emb)
@@ -130,13 +130,6 @@ def main() -> None:
             neighbor_radius=args.contact_radius,
             surface_sasa_threshold=args.surface_sasa_threshold,
         )
-        sasa = (structural["sasa"].float() / SASA_SCALE_MAX).clamp(0.0, 1.0)
-        rsa = structural["rsa"].float().clamp(0.0, 1.0)
-        residue_depth = (structural["residue_depth"].float() / 20.0).clamp(0.0, 1.0)
-        coordination_number = (structural["coordination_number"].float() / 32.0).clamp(0.0, 1.0)
-        hse = (structural["hse"].float() / 32.0).clamp(0.0, 1.0)
-        dihedral_sincos = structural["dihedral_sincos"].float()
-        dssp_3state = structural["dssp_3state"].float()
 
         plddt_raw = d["plddt"].float()
         if plddt_raw.size(0) != x_esm.size(0):
@@ -151,6 +144,14 @@ def main() -> None:
             d["y_delta"] = d["y_delta"][:min_len]
             d["residue_ids"] = d["residue_ids"][:min_len]
             skip_reasons["length_mismatch_truncated"] += 1
+
+        sasa = (structural["sasa"].float() / SASA_SCALE_MAX).clamp(0.0, 1.0)
+        rsa = structural["rsa"].float().clamp(0.0, 1.0)
+        residue_depth = (structural["residue_depth"].float() / 20.0).clamp(0.0, 1.0)
+        coordination_number = (structural["coordination_number"].float() / 32.0).clamp(0.0, 1.0)
+        hse = (structural["hse"].float() / 32.0).clamp(0.0, 1.0)
+        dihedral_sincos = structural["dihedral_sincos"].float()
+        dssp_3state = structural["dssp_3state"].float()
         plddt = (plddt_raw / PLDDT_SCALE_MAX).clamp(0.0, 1.0)
         x = torch.cat(
             [
@@ -179,6 +180,7 @@ def main() -> None:
             "x": x,
             "pos": d["af2_pos"].float(),
             "y_delta": d["y_delta"].float(),
+            "plddt": plddt_raw,
             "edge_index": edge_index,
             "edge_attr": edge_attr,
         }
