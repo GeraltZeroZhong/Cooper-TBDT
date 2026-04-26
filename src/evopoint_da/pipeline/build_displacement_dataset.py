@@ -12,7 +12,9 @@ from collections import Counter
 import numpy as np
 import torch
 
-from evopoint_da.data.components import StructureParser, compute_displacement_target
+from evopoint_da.data.alignment import compute_displacement_target
+from evopoint_da.data.paths import DEFAULT_PDB_UNIPROT_MAPPING
+from evopoint_da.data.structure import StructureParser
 
 
 def args_parser() -> argparse.Namespace:
@@ -20,7 +22,7 @@ def args_parser() -> argparse.Namespace:
     p.add_argument("--af2_dir", default="data/raw_af2")
     p.add_argument("--holo_dir", default="data/raw_pdb")
     p.add_argument("--out_dir", default="data/processed_pairs")
-    p.add_argument("--mapping_file", default="pdb_uniprot_mapping.json")
+    p.add_argument("--mapping_file", default=DEFAULT_PDB_UNIPROT_MAPPING)
     p.add_argument("--report_path", default="artifacts/build_pairs_report.json")
     return p.parse_args()
 

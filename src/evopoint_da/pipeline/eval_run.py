@@ -15,6 +15,7 @@ from omegaconf import OmegaConf
 
 from evopoint_da.data.datamodule import EvoPointDataModule
 from evopoint_da.models.module import EvoPointLitModule
+from evopoint_da.utils.binning import parse_float_edges
 
 
 def get_args() -> argparse.Namespace:
@@ -64,12 +65,7 @@ def get_args() -> argparse.Namespace:
 
 
 def _parse_float_edges(raw: str) -> list[float]:
-    vals = [float(x.strip()) for x in str(raw).split(",") if x.strip()]
-    if len(vals) < 2:
-        raise ValueError("At least two bin edges are required.")
-    if any(b <= a for a, b in zip(vals[:-1], vals[1:])):
-        raise ValueError("Bin edges must be strictly increasing.")
-    return vals
+    return parse_float_edges(raw)
 
 
 def _extract_plddt_from_batch(batch: torch.Tensor, fallback_index: int = 128) -> torch.Tensor:

@@ -1,28 +1,23 @@
 import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
+
+from evopoint_da.utils.binning import build_bin_ranges as _build_bin_ranges
+
 from .backbones.egnn import EGNNBackbone
-
-
-def _format_bin_value(value: float) -> str:
-    if float(value).is_integer():
-        return str(int(value))
-    return str(value).replace(".", "p")
-
-
-def _build_bin_ranges(edges: list[float], last_label: str = "gt") -> list[tuple[float, float | None, str]]:
-    if len(edges) < 2:
-        raise ValueError("Bin edges must include at least 2 values.")
-    ranges: list[tuple[float, float | None, str]] = []
-    for low, high in zip(edges[:-1], edges[1:]):
-        ranges.append((float(low), float(high), f"{_format_bin_value(low)}to{_format_bin_value(high)}"))
-    ranges.append((float(edges[-1]), None, f"{last_label}{_format_bin_value(edges[-1])}"))
-    return ranges
 
 
 def _in_disp_range(values: torch.Tensor, low: float, high: float) -> torch.Tensor:
     """Left-closed/right-open displacement range mask."""
     return (values >= float(low)) & (values < float(high))
+
+
+def _as_raw_plddt(plddt: torch.Tensor) -> torch.Tensor:
+    if plddt.dim() > 1:
+        plddt = plddt.squeeze(-1)
+    if plddt.numel() > 0 and float(plddt.detach().max().item()) <= 1.5:
+        plddt = plddt * 100.0
+    return plddt.float()
 
 
 class EvoPointLitModule(pl.LightningModule):
@@ -32,7 +27,7 @@ class EvoPointLitModule(pl.LightningModule):
         hidden_dim: int = 128,
         num_layers: int = 4,
         edge_dim: int = 2,
-        lr: float = 1e-4, 
+        lr: float = 1e-4,
         weight_decay: float = 1e-5,
         lambda_clash: float = 0.1,
         clash_cutoff: float = 2.0,
@@ -271,15 +266,12 @@ class EvoPointLitModule(pl.LightningModule):
         focus_warmup = _warmup_factor(int(self.hparams.focus_warmup_epochs))
 
         if hasattr(batch, "plddt") and batch.plddt is not None:
-            plddt = batch.plddt
-            if plddt.dim() > 1:
-                plddt = plddt.squeeze(-1)
+            plddt = _as_raw_plddt(batch.plddt)
 
             low_plddt_threshold = self.hparams.plddt_gate_start
             high_plddt_threshold = max(self.hparams.plddt_gate_end, low_plddt_threshold + self.hparams.cosine_eps)
 
             low_plddt_mask = plddt < low_plddt_threshold
-            mid_plddt_mask = (plddt >= low_plddt_threshold) & (plddt <= high_plddt_threshold)
             high_plddt_mask = plddt > high_plddt_threshold
 
             if low_plddt_mask.any():
@@ -371,9 +363,7 @@ class EvoPointLitModule(pl.LightningModule):
         gt_disp_mag = torch.norm(batch.y, dim=-1)
         self._log_disp_group_metrics(stage, delta_pred_real, batch.y, gt_disp_mag, batch_size)
         if hasattr(batch, "plddt") and batch.plddt is not None:
-            plddt = batch.plddt
-            if plddt.dim() > 1:
-                plddt = plddt.squeeze(-1)
+            plddt = _as_raw_plddt(batch.plddt)
             self._log_plddt_bin_metrics(
                 stage=stage,
                 plddt=plddt,
@@ -518,9 +508,7 @@ class EvoPointLitModule(pl.LightningModule):
 
         # pLDDT-binned metrics
         if hasattr(batch, "plddt") and batch.plddt is not None:
-            plddt = batch.plddt
-            if plddt.dim() > 1:
-                plddt = plddt.squeeze(-1)
+            plddt = _as_raw_plddt(batch.plddt)
             self._log_plddt_bin_metrics(
                 stage="test",
                 plddt=plddt,

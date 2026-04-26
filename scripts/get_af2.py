@@ -5,7 +5,7 @@ How to use:
 
 Purpose:
 - Downloads AF2 PDB/PAE files by mapping local raw PDB IDs to UniProt IDs.
-- Generates/updates `pdb_uniprot_mapping.json`.
+- Generates/updates `data/metadata/pdb_uniprot_mapping.json`.
 
 Notes:
 - Network dependent and intended for dataset bootstrap/update phases.
@@ -22,7 +22,7 @@ import json
 # 配置路径
 SAVE_DIR = "./data/raw_af2"
 RAW_PDB_DIR = "./data/raw_pdb"
-MAPPING_FILE = "pdb_uniprot_mapping.json"
+MAPPING_FILE = "./data/metadata/pdb_uniprot_mapping.json"
 
 # 线程锁
 print_lock = threading.Lock()
@@ -154,6 +154,7 @@ def main():
     # 3. 保存映射字典
     print(f"正在保存映射字典到 {MAPPING_FILE} ...")
     try:
+        os.makedirs(os.path.dirname(MAPPING_FILE), exist_ok=True)
         with open(MAPPING_FILE, "w") as f:
             json.dump(mapping_dict, f, indent=4)
         print(f"成功保存 {len(mapping_dict)} 条映射记录。")

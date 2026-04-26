@@ -20,7 +20,8 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from evopoint_da.data.components import ESMFeatureExtractor, PCAReducer, StructureParser
+from evopoint_da.data.features import ESMFeatureExtractor, PCAReducer
+from evopoint_da.data.structure import StructureParser
 
 
 def get_args():

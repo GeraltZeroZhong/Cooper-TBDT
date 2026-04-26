@@ -20,6 +20,9 @@ class EvoPointDataModule(pl.LightningDataModule):
         split_ranges: dict | None = None,
         fallback_num_features: int = 144,
         split_manifest_name: str = "split_manifest.json",
+        allow_empty_fallback: bool = False,
+        allow_length_truncation: bool = False,
+        plddt_feature_index: int = 128,
     ):
         super().__init__()
         if split_ranges is None:
@@ -64,42 +67,29 @@ class EvoPointDataModule(pl.LightningDataModule):
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
 
+    def _make_dataset(self, split: str) -> EvoPointDataset:
+        if self._split_files is None:
+            raise RuntimeError("Split files have not been initialized.")
+        return EvoPointDataset(
+            self.hparams.data_dir,
+            split=split,
+            split_seed=self.hparams.split_seed,
+            split_ranges=self.hparams.split_ranges,
+            fallback_num_features=self.hparams.fallback_num_features,
+            file_list=self._split_files.get(split, []),
+            allow_empty_fallback=self.hparams.allow_empty_fallback,
+            allow_length_truncation=self.hparams.allow_length_truncation,
+            plddt_feature_index=self.hparams.plddt_feature_index,
+        )
+
     def setup(self, stage: Optional[str] = None):
         self._build_and_validate_splits()
         if stage in ("fit", None):
-            self.train_set = EvoPointDataset(
-                self.hparams.data_dir,
-                split="train",
-                split_seed=self.hparams.split_seed,
-                split_ranges=self.hparams.split_ranges,
-                fallback_num_features=self.hparams.fallback_num_features,
-                file_list=self._split_files.get("train", []),
-            )
-            self.val_set = EvoPointDataset(
-                self.hparams.data_dir,
-                split="val",
-                split_seed=self.hparams.split_seed,
-                split_ranges=self.hparams.split_ranges,
-                fallback_num_features=self.hparams.fallback_num_features,
-                file_list=self._split_files.get("val", []),
-            )
-            self.calib_set = EvoPointDataset(
-                self.hparams.data_dir,
-                split="calib",
-                split_seed=self.hparams.split_seed,
-                split_ranges=self.hparams.split_ranges,
-                fallback_num_features=self.hparams.fallback_num_features,
-                file_list=self._split_files.get("calib", []),
-            )
+            self.train_set = self._make_dataset("train")
+            self.val_set = self._make_dataset("val")
+            self.calib_set = self._make_dataset("calib")
         if stage in ("test", None):
-            self.test_set = EvoPointDataset(
-                self.hparams.data_dir,
-                split="test",
-                split_seed=self.hparams.split_seed,
-                split_ranges=self.hparams.split_ranges,
-                fallback_num_features=self.hparams.fallback_num_features,
-                file_list=self._split_files.get("test", []),
-            )
+            self.test_set = self._make_dataset("test")
 
     def train_dataloader(self):
         return DataLoader(self.train_set, batch_size=self.hparams.batch_size, shuffle=True, num_workers=self.hparams.num_workers)
