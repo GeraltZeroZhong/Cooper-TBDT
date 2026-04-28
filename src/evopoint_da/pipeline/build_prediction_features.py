@@ -40,6 +40,7 @@ class PredictionFeatureBuildConfig:
     contact_radius: float = 10.0
     surface_sasa_threshold: float = 1.0
     require_pae: bool = False
+    require_dssp: bool = True
 
 
 def _sha256_file(path: Path) -> str:
@@ -131,7 +132,7 @@ def build_prediction_feature_graph(cfg: PredictionFeatureBuildConfig) -> dict[st
         pca=pca,
         contact_radius=cfg.contact_radius,
         surface_sasa_threshold=cfg.surface_sasa_threshold,
-        require_dssp=True,
+        require_dssp=cfg.require_dssp,
     )
 
     if x.size(1) != 144:
@@ -160,7 +161,7 @@ def build_prediction_feature_graph(cfg: PredictionFeatureBuildConfig) -> dict[st
         "k": int(cfg.k),
         "contact_radius": float(cfg.contact_radius),
         "surface_sasa_threshold": float(cfg.surface_sasa_threshold),
-        "dssp_required": True,
+        "dssp_required": bool(cfg.require_dssp),
         "feature_dim": int(x.size(1)),
         "n_nodes": int(x.size(0)),
         "dssp_3state_order": ["helix", "strand", "coil"],

@@ -199,6 +199,7 @@ def _ensure_prediction_feature_pt(args: Any, selected_chain_id: str) -> dict[str
             contact_radius=float(getattr(args, "feature_contact_radius", 10.0)),
             surface_sasa_threshold=float(getattr(args, "feature_surface_sasa_threshold", 1.0)),
             require_pae=bool(getattr(args, "require_pae", False)),
+            require_dssp=not bool(getattr(args, "allow_dssp_fallback", False)),
         )
     )
     args.feature_pt = str(feature_pt)
@@ -765,6 +766,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--feature_pca_dim", type=int, default=128)
     p.add_argument("--feature_contact_radius", type=float, default=10.0)
     p.add_argument("--feature_surface_sasa_threshold", type=float, default=1.0)
+    p.add_argument(
+        "--allow_dssp_fallback",
+        action="store_true",
+        help="If mkdssp fails during automatic feature generation, keep coil-state DSSP fallback features.",
+    )
     p.add_argument(
         "--feature_pos_tolerance",
         type=float,
