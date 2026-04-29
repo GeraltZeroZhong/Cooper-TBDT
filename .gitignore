@@ -25,8 +25,7 @@ artifacts/
 wandb/
 
 # Local-only internal notes and analysis markdown
-docs/*
-!docs/tbdt_v1.md
+docs/
 local_handoff/
 tools/
 *.log
