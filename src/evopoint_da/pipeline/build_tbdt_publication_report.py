@@ -19,6 +19,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from scipy.stats import rankdata, wilcoxon
 
 from evopoint_da.pipeline.eval_tbdt_state import _as_mapping, _extract_regions, _extract_target, _load_pt
 from evopoint_da.pipeline.build_features_with_sasa import (
@@ -414,7 +415,13 @@ def _load_json(path: Path) -> dict[str, Any]:
         return json.load(handle)
 
 
-def _bootstrap_ci(values: list[float], *, n_iter: int, seed: int) -> tuple[float | None, float | None]:
+def _bootstrap_ci(
+    values: list[float],
+    *,
+    n_iter: int,
+    seed: int,
+    statistic: str = "mean",
+) -> tuple[float | None, float | None]:
     values = [float(v) for v in values if math.isfinite(float(v))]
     if not values:
         return None, None
@@ -423,8 +430,49 @@ def _bootstrap_ci(values: list[float], *, n_iter: int, seed: int) -> tuple[float
     stats = np.empty(int(n_iter), dtype=float)
     for idx in range(int(n_iter)):
         sample = arr[rng.integers(0, arr.size, size=arr.size)]
-        stats[idx] = float(np.mean(sample))
+        stats[idx] = float(np.median(sample) if statistic == "median" else np.mean(sample))
     return float(np.percentile(stats, 2.5)), float(np.percentile(stats, 97.5))
+
+
+def _wilcoxon_delta_stats(deltas: list[float]) -> dict[str, Any]:
+    values = np.asarray([float(v) for v in deltas if math.isfinite(float(v)) and abs(float(v)) > 1e-12])
+    if values.size == 0:
+        return {
+            "wilcoxon_n_nonzero": 0,
+            "wilcoxon_statistic_less": None,
+            "wilcoxon_p_less_method_lt_raw": None,
+            "wilcoxon_statistic_two_sided": None,
+            "wilcoxon_p_two_sided": None,
+            "signed_rank_biserial_effect_method_lt_raw": None,
+            "wilcoxon_status": "no_nonzero_deltas",
+        }
+    ranks = rankdata(np.abs(values), method="average")
+    improved_rank_sum = float(np.sum(ranks[values < 0.0]))
+    worsened_rank_sum = float(np.sum(ranks[values > 0.0]))
+    rank_total = improved_rank_sum + worsened_rank_sum
+    effect = (improved_rank_sum - worsened_rank_sum) / rank_total if rank_total else None
+    try:
+        less = wilcoxon(values, alternative="less", zero_method="wilcox")
+        two = wilcoxon(values, alternative="two-sided", zero_method="wilcox")
+    except ValueError as exc:
+        return {
+            "wilcoxon_n_nonzero": int(values.size),
+            "wilcoxon_statistic_less": None,
+            "wilcoxon_p_less_method_lt_raw": None,
+            "wilcoxon_statistic_two_sided": None,
+            "wilcoxon_p_two_sided": None,
+            "signed_rank_biserial_effect_method_lt_raw": effect,
+            "wilcoxon_status": str(exc),
+        }
+    return {
+        "wilcoxon_n_nonzero": int(values.size),
+        "wilcoxon_statistic_less": float(less.statistic),
+        "wilcoxon_p_less_method_lt_raw": float(less.pvalue),
+        "wilcoxon_statistic_two_sided": float(two.statistic),
+        "wilcoxon_p_two_sided": float(two.pvalue),
+        "signed_rank_biserial_effect_method_lt_raw": effect,
+        "wilcoxon_status": "ok",
+    }
 
 
 def _coordinate_metric_specs() -> list[tuple[str, str, Path, str]]:
@@ -724,6 +772,153 @@ def _seed_stability_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _paired_delta_summary_from_rows(
+    rows: list[dict[str, Any]],
+    *,
+    n_iter: int,
+    seed: int,
+) -> list[dict[str, Any]]:
+    by_key: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        by_key[
+            (
+                str(row.get("method", "")),
+                str(row.get("label", "")),
+                str(row.get("aggregation", "")),
+                str(row.get("region", "")),
+            )
+        ].append(row)
+
+    summary: list[dict[str, Any]] = []
+    for (method, label, aggregation, region), region_rows in sorted(by_key.items()):
+        deltas = [
+            float(row["delta_rmsd_method_minus_raw"])
+            for row in region_rows
+            if _float_or_none(row.get("delta_rmsd_method_minus_raw")) is not None
+        ]
+        if not deltas:
+            continue
+        mean_ci = _bootstrap_ci(deltas, n_iter=n_iter, seed=seed, statistic="mean")
+        median_ci = _bootstrap_ci(deltas, n_iter=n_iter, seed=seed + 101, statistic="median")
+        seed_counts = [
+            int(row.get("n_seeds") or 0)
+            for row in region_rows
+            if str(row.get("n_seeds") or "").strip()
+        ]
+        summary.append(
+            {
+                "method": method,
+                "label": label,
+                "category": "primary_model",
+                "aggregation": aggregation,
+                "region": region,
+                "n_targets": len(deltas),
+                "n_seeds": max(seed_counts) if seed_counts else "",
+                "n_improved": sum(1 for value in deltas if value < 0.0),
+                "n_worsened": sum(1 for value in deltas if value > 0.0),
+                "n_tied": sum(1 for value in deltas if value == 0.0),
+                "improved_fraction": sum(1.0 for value in deltas if value < 0.0) / float(len(deltas)),
+                "median_delta_rmsd_method_minus_raw": float(np.median(deltas)),
+                "mean_delta_rmsd_method_minus_raw": float(np.mean(deltas)),
+                "mean_delta_ci95_low": mean_ci[0],
+                "mean_delta_ci95_high": mean_ci[1],
+                "median_delta_ci95_low": median_ci[0],
+                "median_delta_ci95_high": median_ci[1],
+                **_wilcoxon_delta_stats(deltas),
+            }
+        )
+    return summary
+
+
+def _primary_model_paired_delta_tables(
+    metric_dir: Path,
+    *,
+    n_iter: int,
+    seed: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    seed_files = sorted(metric_dir.glob("seed_*_best-selection_test.json"))
+    seed_rows: list[dict[str, Any]] = []
+    per_target: dict[tuple[str, str], dict[str, Any]] = {}
+    for path in seed_files:
+        stem_parts = path.stem.split("_")
+        seed_id = stem_parts[1] if len(stem_parts) > 1 else ""
+        report = _load_json(path)
+        for sample in report.get("samples") or []:
+            sample_id = str(sample.get("sample_id") or "")
+            for region, metrics in (sample.get("regions") or {}).items():
+                if region not in REGIONS:
+                    continue
+                raw = _float_or_none(metrics.get("zero_error_rms"))
+                method_rmsd = _float_or_none(metrics.get("prediction_error_rms"))
+                if raw is None or method_rmsd is None:
+                    continue
+                delta = method_rmsd - raw
+                seed_rows.append(
+                    {
+                        "method": f"cooper_tbdt_scaffold_single_seed{seed_id}",
+                        "label": f"Cooper-TBDT single scaffold-prior seed {seed_id}",
+                        "category": "primary_model_seed",
+                        "aggregation": "single_seed",
+                        "seed": seed_id,
+                        "sample_id": sample_id,
+                        "region": region,
+                        "raw_af2_rmsd": raw,
+                        "method_rmsd": method_rmsd,
+                        "delta_rmsd_method_minus_raw": delta,
+                        "improved": delta < 0.0,
+                        "worsened": delta > 0.0,
+                        "n_residues": metrics.get("n_residues", ""),
+                        "n_seeds": 1,
+                        "source_json": str(path),
+                    }
+                )
+                target_key = (sample_id, region)
+                target = per_target.setdefault(
+                    target_key,
+                    {
+                        "sample_id": sample_id,
+                        "region": region,
+                        "raw_values": [],
+                        "method_values": [],
+                        "seed_ids": [],
+                    },
+                )
+                target["raw_values"].append(raw)
+                target["method_values"].append(method_rmsd)
+                target["seed_ids"].append(seed_id)
+
+    family_rows: list[dict[str, Any]] = []
+    for (_sample_id, _region), target in sorted(per_target.items()):
+        raw_values = [float(value) for value in target["raw_values"]]
+        method_values = [float(value) for value in target["method_values"]]
+        raw = float(np.mean(raw_values))
+        method_rmsd = float(np.mean(method_values))
+        delta = method_rmsd - raw
+        family_rows.append(
+            {
+                "method": "cooper_tbdt_scaffold_single_5seed_mean",
+                "label": "Cooper-TBDT single scaffold-prior 5-seed family",
+                "category": "primary_model",
+                "aggregation": "per_target_seed_mean",
+                "seed": "all",
+                "sample_id": target["sample_id"],
+                "region": target["region"],
+                "raw_af2_rmsd": raw,
+                "method_rmsd": method_rmsd,
+                "delta_rmsd_method_minus_raw": delta,
+                "improved": delta < 0.0,
+                "worsened": delta > 0.0,
+                "n_residues": "",
+                "n_seeds": len(set(target["seed_ids"])),
+                "source_json": str(metric_dir),
+            }
+        )
+
+    sample_rows = family_rows + seed_rows
+    summary_rows = _paired_delta_summary_from_rows(sample_rows, n_iter=n_iter, seed=seed)
+    return summary_rows, sample_rows
+
+
 def _selector_sensitivity_rows() -> list[dict[str, Any]]:
     selectors = [
         ("best-selection", Path("artifacts/tbdt_v1/seed_stability_best_selection/seed_stability_aggregate.csv")),
@@ -926,6 +1121,11 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     seed_stability_rows = _seed_stability_rows(
         Path("artifacts/tbdt_v1/seed_stability_best_selection/seed_stability_aggregate.csv")
     )
+    primary_paired_delta_rows, primary_paired_delta_sample_rows = _primary_model_paired_delta_tables(
+        Path("artifacts/tbdt_v1/seed_stability_best_selection/metrics"),
+        n_iter=int(args.bootstrap_iter),
+        seed=int(args.bootstrap_seed),
+    )
     selector_sensitivity_rows = _selector_sensitivity_rows()
     classification_rows = _classification_rows(Path("artifacts/tbdt_v1/external_baseline_curves/classification_curve_report.json"))
     template_summary = _template_selection_summary(Path("artifacts/tbdt_v1/template_baselines/template_baseline_selection.csv"))
@@ -980,6 +1180,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         Path("artifacts/tbdt_v1/seed_stability_best_selection/seed_stability_aggregate.csv"),
         Path("artifacts/tbdt_v1/seed_stability_best_selection/seed_stability_report.json"),
         Path("artifacts/tbdt_v1/seed_stability_best_selection/seed_stability_report.md"),
+        *sorted(Path("artifacts/tbdt_v1/seed_stability_best_selection/metrics").glob("seed_*_best-selection_test.json")),
         Path("artifacts/tbdt_v1/report_models/report_models_report.json"),
         Path("artifacts/tbdt_v1/report_models/report_model_summary.csv"),
         Path("artifacts/tbdt_v1/report_models/prediction_reports/validation_calibrated_region_blend_test.json"),
@@ -1008,6 +1209,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     _write_csv(out_dir / "coordinate_metrics_summary.csv", coordinate_rows)
     _write_csv(out_dir / "coordinate_sample_metrics.csv", coordinate_sample_rows)
     _write_csv(out_dir / "neural_ablation_summary.csv", neural_comparison_rows)
+    _write_csv(out_dir / "primary_model_paired_delta_summary.csv", primary_paired_delta_rows)
+    _write_csv(out_dir / "primary_model_paired_delta_samples.csv", primary_paired_delta_sample_rows)
     _write_csv(out_dir / "classification_metrics_summary.csv", classification_rows)
     _write_csv(out_dir / "selector_sensitivity_summary.csv", selector_sensitivity_rows)
     _write_json(out_dir / "dataset_summary.json", {"manifests": manifest_summaries, "split_leakage": split_leakage})
@@ -1022,6 +1225,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     )
     _write_json(out_dir / "coordinate_metrics_summary.json", coordinate_rows)
     _write_json(out_dir / "neural_ablation_summary.json", neural_comparison_rows)
+    _write_json(out_dir / "primary_model_paired_delta_summary.json", primary_paired_delta_rows)
+    _write_json(out_dir / "primary_model_paired_delta_samples.json", primary_paired_delta_sample_rows)
     _write_json(out_dir / "classification_metrics_summary.json", classification_rows)
     _write_json(out_dir / "selector_sensitivity_summary.json", selector_sensitivity_rows)
     _write_json(out_dir / "template_selection_summary.json", template_summary)
@@ -1051,6 +1256,16 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         if row.get("scope") == "gold_graphs" and row.get("split") == "test" and row.get("region") in {"eval", "plug", "tonb_box"}
     ]
     primary_class = [row for row in classification_rows if row.get("region") in {"eval", "plug", "tonb_box"}]
+    primary_paired_delta_family = [
+        row
+        for row in primary_paired_delta_rows
+        if row.get("aggregation") == "per_target_seed_mean" and row.get("region") in (*PRIMARY_REGIONS, "all")
+    ]
+    paired_region_order = {region: idx for idx, region in enumerate((*PRIMARY_REGIONS, "all"))}
+    primary_paired_delta_family = sorted(
+        primary_paired_delta_family,
+        key=lambda row: paired_region_order.get(str(row.get("region")), 99),
+    )
     markdown = [
         "# Cooper-TBDT v1 Publication Report",
         "",
@@ -1097,6 +1312,28 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         _markdown_table(seed_stability_rows, ["endpoint", "n_seeds", "mean", "std", "min", "max"])
         if seed_stability_rows
         else "Seed stability artifacts not found.",
+        "",
+        "## Primary Model Paired Delta",
+        "",
+        "Delta RMSD is `RMSD(model) - RMSD(raw AF2)`. The 5-seed family row averages model RMSD across seeds per target before the paired test, so targets remain the statistical unit.",
+        "",
+        _markdown_table(
+            primary_paired_delta_family,
+            [
+                "label",
+                "region",
+                "n_targets",
+                "n_improved",
+                "n_worsened",
+                "median_delta_rmsd_method_minus_raw",
+                "median_delta_ci95_low",
+                "median_delta_ci95_high",
+                "wilcoxon_p_less_method_lt_raw",
+                "signed_rank_biserial_effect_method_lt_raw",
+            ],
+        )
+        if primary_paired_delta_family
+        else "Primary paired-delta artifacts not found.",
         "",
         "## Selector Sensitivity",
         "",
@@ -1148,6 +1385,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "",
         "- Coordinate summary: `coordinate_metrics_summary.csv`",
         "- Seed stability: `../seed_stability_best_selection/seed_stability_report.md`",
+        "- Primary model paired delta: `primary_model_paired_delta_summary.csv`",
         "- Selector sensitivity: `selector_sensitivity_summary.csv`",
         "- Displacement bins: `displacement_bin_summary.csv`",
         "- Classification summary: `classification_metrics_summary.csv`",
@@ -1167,6 +1405,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "graph_summaries": {"gold_graphs": graph_summary_gold, "silver_clean_graphs": graph_summary_silver},
         "coordinate_metric_rows": len(coordinate_rows),
         "seed_stability_rows": len(seed_stability_rows),
+        "primary_paired_delta_rows": len(primary_paired_delta_rows),
         "selector_sensitivity_rows": len(selector_sensitivity_rows),
         "neural_comparison_rows": len(neural_comparison_rows),
         "displacement_bin_rows": len(displacement_bin_rows),
