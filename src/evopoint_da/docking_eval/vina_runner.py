@@ -374,7 +374,13 @@ def prepare_ligand_with_meeko(
     binary = resolve_binary("mk_prepare_ligand.py", dry_run=dry_run)
     ligand_pdbqt = Path(ligand_pdbqt)
     ligand_pdbqt.parent.mkdir(parents=True, exist_ok=True)
-    run_command([binary, "-i", str(input_sdf), "-o", str(ligand_pdbqt)], log_path=log_path, dry_run=dry_run)
+    try:
+        run_command([binary, "-i", str(input_sdf), "-o", str(ligand_pdbqt)], log_path=log_path, dry_run=dry_run)
+    except RuntimeError:
+        obabel = find_binary("obabel")
+        if obabel is None:
+            raise
+        run_command([obabel, str(input_sdf), "-O", str(ligand_pdbqt)], log_path=log_path, dry_run=dry_run)
     return ligand_pdbqt
 
 
@@ -437,7 +443,13 @@ def export_docking_results_with_meeko(
     binary = resolve_binary("mk_export.py", dry_run=dry_run)
     output_sdf = Path(output_sdf)
     output_sdf.parent.mkdir(parents=True, exist_ok=True)
-    run_command([binary, str(docking_pdbqt), "-s", str(output_sdf)], log_path=log_path, dry_run=dry_run)
+    try:
+        run_command([binary, str(docking_pdbqt), "-s", str(output_sdf)], log_path=log_path, dry_run=dry_run)
+    except RuntimeError:
+        obabel = find_binary("obabel")
+        if obabel is None:
+            raise
+        run_command([obabel, str(docking_pdbqt), "-O", str(output_sdf)], log_path=log_path, dry_run=dry_run)
     return output_sdf
 
 
