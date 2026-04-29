@@ -35,6 +35,8 @@ PIPELINE_STEPS: tuple[StepSpec, ...] = (
     StepSpec("coordinate_baselines", "evopoint_da.pipeline.build_tbdt_coordinate_baselines"),
     StepSpec("external_baselines", "evopoint_da.pipeline.build_tbdt_external_baselines"),
     StepSpec("eval_classification", "evopoint_da.pipeline.eval_tbdt_classification_curves"),
+    StepSpec("seed_stability", "evopoint_da.pipeline.run_tbdt_seed_stability"),
+    StepSpec("report_models", "evopoint_da.pipeline.run_tbdt_report_models"),
     StepSpec("publication_report", "evopoint_da.pipeline.build_tbdt_publication_report"),
     StepSpec("docking_eval", "evopoint_da.docking_eval.pipeline_cli"),
 )

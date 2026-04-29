@@ -21,10 +21,25 @@ import numpy as np
 import torch
 
 from evopoint_da.pipeline.eval_tbdt_state import _as_mapping, _extract_regions, _extract_target, _load_pt
+from evopoint_da.pipeline.build_features_with_sasa import (
+    _metadata_af2_path,
+    _metadata_uniprot_id,
+    _resolve_pae_path,
+    build_uniprot_to_af2_path,
+)
+from evopoint_da.data.graph import parse_pae_matrix_for_indices, parse_pae_matrix_for_residue_ids
+from evopoint_da.data.structure import StructureParser
 
 
 REGIONS = ("eval", "plug", "tonb_box", "barrel_core", "all")
 PRIMARY_REGIONS = ("eval", "plug", "tonb_box", "barrel_core")
+DISPLACEMENT_BINS = (
+    ("lt_0p5", 0.0, 0.5),
+    ("0p5_to_1", 0.5, 1.0),
+    ("1_to_2", 1.0, 2.0),
+    ("2_to_5", 2.0, 5.0),
+    ("ge_5", 5.0, float("inf")),
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,8 +49,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gold-manifest", default="data/tbdt_gold_training_manifest.csv")
     parser.add_argument("--silver-manifest", default="data/tbdt_silver_manifest.csv")
     parser.add_argument("--bronze-manifest", default="data/tbdt_bronze_manifest.csv")
+    parser.add_argument("--gold-pair-dir", default="data/processed_tbdt_gold_pairs")
+    parser.add_argument("--silver-pair-dir", default="data/processed_tbdt_silver_pairs_clean")
     parser.add_argument("--gold-graph-dir", default="data/processed_tbdt_gold_graphs")
     parser.add_argument("--silver-graph-dir", default="data/processed_tbdt_silver_graphs_clean")
+    parser.add_argument("--af2-structure-dir", default="data/raw_af2")
+    parser.add_argument("--pae-dir", default="data/raw_af2")
     parser.add_argument("--test-sample-list", default="artifacts/tbdt_v1/test_graph_files.txt")
     parser.add_argument("--bootstrap-iter", type=int, default=5000)
     parser.add_argument("--bootstrap-seed", type=int, default=42)
@@ -183,6 +202,100 @@ def _graph_files(path: Path) -> list[Path]:
     return sorted(path.glob("*.pt")) if path.exists() else []
 
 
+def _pair_files(path: Path) -> list[Path]:
+    return sorted(path.glob("*.pt")) if path.exists() else []
+
+
+def _strict_input_check(pair_dir: Path, af2_dir: Path, pae_dir: Path, scope: str) -> dict[str, Any]:
+    files = _pair_files(pair_dir)
+    parser = StructureParser()
+    af2_by_uniprot = build_uniprot_to_af2_path(str(af2_dir))
+    af2_by_lower = {key.lower(): value for key, value in af2_by_uniprot.items()}
+    residue_cache: dict[str, set[str]] = {}
+    counts = Counter()
+    examples: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    def _example(kind: str, payload: dict[str, Any]) -> None:
+        if len(examples[kind]) < 8:
+            examples[kind].append(payload)
+
+    for path in files:
+        sample = _as_mapping(_load_pt(path))
+        stem = str(sample.get("pair_id") or path.stem)
+        uniprot_id = _metadata_uniprot_id(sample)
+        af2_path = _metadata_af2_path(sample)
+        if uniprot_id:
+            af2_path = af2_path or af2_by_uniprot.get(uniprot_id) or af2_by_lower.get(uniprot_id.lower())
+        if not af2_path or not Path(af2_path).exists():
+            counts["missing_af2"] += 1
+            _example("missing_af2", {"pair_id": stem, "uniprot_id": uniprot_id})
+            continue
+
+        af2_key = str(Path(af2_path).resolve())
+        if af2_key not in residue_cache:
+            chains = parser.parse_ca_structure(af2_key, strict=True) or {}
+            residue_cache[af2_key] = {
+                str(rid)
+                for chain_data in chains.values()
+                for rid in chain_data.get("residue_ids", [])
+            }
+        residue_ids = [str(rid) for rid in sample.get("residue_ids", [])]
+        missing_residue_ids = [rid for rid in residue_ids if rid not in residue_cache[af2_key]]
+        if missing_residue_ids:
+            counts["residue_id_mismatch"] += 1
+            _example(
+                "residue_id_mismatch",
+                {
+                    "pair_id": stem,
+                    "missing_count": len(missing_residue_ids),
+                    "missing_preview": missing_residue_ids[:5],
+                },
+            )
+
+        pae_path = _resolve_pae_path(str(pae_dir), uniprot_id, stem)
+        if pae_path is None:
+            counts["missing_pae"] += 1
+            _example("missing_pae", {"pair_id": stem, "uniprot_id": uniprot_id})
+            continue
+        try:
+            if "af2_indices" in sample:
+                indices = [int(value) for value in torch.as_tensor(sample["af2_indices"]).reshape(-1).tolist()]
+                parse_pae_matrix_for_indices(pae_path, indices, strict=True)
+            else:
+                parse_pae_matrix_for_residue_ids(pae_path, residue_ids, strict=True)
+        except Exception as exc:
+            counts["pae_alignment_error"] += 1
+            _example("pae_alignment_error", {"pair_id": stem, "pae_path": pae_path, "error": str(exc)})
+
+    failed_pairs = sum(counts.values())
+    return {
+        "scope": scope,
+        "pair_dir": str(pair_dir),
+        "af2_structure_dir": str(af2_dir),
+        "pae_dir": str(pae_dir),
+        "pair_count": len(files),
+        "failed_pair_checks": int(failed_pairs),
+        "counts": dict(counts),
+        "examples": dict(examples),
+        "status": "passed" if failed_pairs == 0 else "failed",
+    }
+
+
+def _sample_split(sample: dict[str, Any]) -> str:
+    split = sample.get("split")
+    if split:
+        return str(split)
+    metadata = sample.get("metadata", {})
+    if isinstance(metadata, dict):
+        split = metadata.get("split")
+        if split:
+            return str(split)
+        manifest_row = metadata.get("manifest_row", {})
+        if isinstance(manifest_row, dict) and manifest_row.get("split"):
+            return str(manifest_row["split"])
+    return "unknown"
+
+
 def _region_graph_summary(files: list[Path], scope: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     aggregate: dict[str, dict[str, list[torch.Tensor] | int]] = {
         region: {"target": [], "count": 0, "samples": 0} for region in REGIONS
@@ -244,6 +357,56 @@ def _region_graph_summary(files: list[Path], scope: str) -> tuple[list[dict[str,
     return sample_rows + region_rows, summary
 
 
+def _displacement_bin_rows(files: list[Path], scope: str) -> list[dict[str, Any]]:
+    accum: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for path in files:
+        sample = _as_mapping(_load_pt(path))
+        split = _sample_split(sample)
+        target = _extract_target(sample, path)
+        n = int(target.size(0))
+        regions = _extract_regions(sample, path.stem, n, {}, include_all=True)
+        norms = torch.linalg.vector_norm(target, dim=-1)
+        for region in REGIONS:
+            mask = regions.get(region)
+            if mask is None or not bool(mask.any()):
+                continue
+            region_norms = norms[mask]
+            for label, lo, hi in DISPLACEMENT_BINS:
+                if math.isinf(hi):
+                    bin_mask = region_norms >= float(lo)
+                else:
+                    bin_mask = (region_norms >= float(lo)) & (region_norms < float(hi))
+                key = (split, region, label)
+                row = accum.setdefault(
+                    key,
+                    {
+                        "scope": scope,
+                        "split": split,
+                        "region": region,
+                        "bin": label,
+                        "low_angstrom": lo,
+                        "high_angstrom": "" if math.isinf(hi) else hi,
+                        "n_residues": 0,
+                        "n_samples_with_region": 0,
+                        "region_residue_total": 0,
+                    },
+                )
+                row["n_residues"] += int(bin_mask.sum().item())
+            region_total = int(mask.sum().item())
+            for label, _lo, _hi in DISPLACEMENT_BINS:
+                row = accum[(split, region, label)]
+                row["n_samples_with_region"] += 1
+                row["region_residue_total"] += region_total
+
+    rows = []
+    for row in accum.values():
+        total = int(row["region_residue_total"])
+        row = dict(row)
+        row["fraction"] = (float(row["n_residues"]) / float(total)) if total else None
+        rows.append(row)
+    return sorted(rows, key=lambda item: (item["scope"], item["split"], item["region"], item["low_angstrom"]))
+
+
 def _load_json(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -298,15 +461,15 @@ def _coordinate_metric_specs() -> list[tuple[str, str, Path, str]]:
         ),
         (
             "cooper_tbdt_scaffold_single",
-            "Cooper-TBDT single scaffold-prior",
-            Path("artifacts/tbdt_v1/scaffold_prior/scaffold_region_weighted_strong_disp1to5_region_metrics.json"),
+            "Cooper-TBDT single scaffold-prior representative seed 404",
+            Path("artifacts/tbdt_v1/seed_stability_best_selection/metrics/seed_404_best-selection_test.json"),
             "primary_model",
         ),
         (
             "cooper_tbdt_scaffold_blend",
-            "Cooper-TBDT scaffold-prior blend",
-            Path("artifacts/tbdt_v1/scaffold_prior/region_blend_scaffold_prior_region_metrics.json"),
-            "primary_model",
+            "Cooper-TBDT validation-calibrated scaffold-prior blend",
+            Path("artifacts/tbdt_v1/report_models/metrics/validation_calibrated_region_blend_test.json"),
+            "secondary_validation_calibrated_model",
         ),
         (
             "global_region_mean",
@@ -381,27 +544,27 @@ def _coordinate_metric_specs() -> list[tuple[str, str, Path, str]]:
             "coordinate_baseline",
         ),
         (
-            "gold_only_balanced",
-            "Gold-only balanced checkpoint",
-            Path("artifacts/tbdt_v1/gold_only_balanced_test_region_metrics_v2.json"),
+            "gold_balanced",
+            "Gold-only balanced ablation",
+            Path("artifacts/tbdt_v1/report_models/metrics/gold_balanced_test.json"),
             "ablation",
         ),
         (
-            "gold_only_region",
-            "Gold-only plug/region checkpoint",
-            Path("artifacts/tbdt_v1/gold_only_region_test_region_metrics_v2.json"),
+            "gold_plug_specialist",
+            "Gold-only plug/eval specialist",
+            Path("artifacts/tbdt_v1/report_models/metrics/gold_plug_specialist_test.json"),
             "ablation",
         ),
         (
-            "gold_only_tonb",
-            "Gold-only TonB checkpoint",
-            Path("artifacts/tbdt_v1/gold_only_tonb_test_region_metrics_v2.json"),
+            "gold_tonb_specialist",
+            "Gold-only TonB specialist",
+            Path("artifacts/tbdt_v1/report_models/metrics/gold_tonb_specialist_test.json"),
             "ablation",
         ),
         (
             "silver_pretrain_finetune",
             "Silver pretrain then Gold fine-tune",
-            Path("artifacts/tbdt_v1/silver_ft_lr3e4_disp1to5_test_region_metrics_v2.json"),
+            Path("artifacts/tbdt_v1/report_models/metrics/silver_pretrain_gold_finetune_test.json"),
             "ablation",
         ),
     ]
@@ -527,18 +690,121 @@ def _markdown_table(rows: list[dict[str, Any]], columns: list[str], max_rows: in
     return "\n".join(lines)
 
 
+def _float_or_none(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _seed_stability_rows(path: Path) -> list[dict[str, Any]]:
+    raw_rows = _read_csv(path)
+    labels = {
+        ("test", "eval", "prediction_error_rms"): "eval RMSD A",
+        ("test", "plug", "prediction_error_rms"): "plug RMSD A",
+        ("test", "tonb_box", "prediction_error_rms"): "TonB RMSD A",
+        ("test", "barrel_core", "predicted_displacement_mean"): "barrel-core predicted mean A",
+        ("test", "selection", "score"): "validation-style score",
+    }
+    rows: list[dict[str, Any]] = []
+    for source in raw_rows:
+        key = (source.get("split", ""), source.get("region", ""), source.get("metric", ""))
+        label = labels.get(key)
+        if label is None:
+            continue
+        row = {"endpoint": label}
+        for field in ("n_seeds", "mean", "std", "min", "max"):
+            value = source.get(field, "")
+            if field == "n_seeds":
+                row[field] = int(value) if str(value).strip() else ""
+            else:
+                row[field] = _float_or_none(value)
+        rows.append(row)
+    return rows
+
+
+def _selector_sensitivity_rows() -> list[dict[str, Any]]:
+    selectors = [
+        ("best-selection", Path("artifacts/tbdt_v1/seed_stability_best_selection/seed_stability_aggregate.csv")),
+        ("best-disp1to5", Path("artifacts/tbdt_v1/seed_stability/seed_stability_aggregate.csv")),
+        ("best-disp1to2", Path("artifacts/tbdt_v1/seed_stability_best_disp1to2/seed_stability_aggregate.csv")),
+        ("best-flex", Path("artifacts/tbdt_v1/seed_stability_best_flex/seed_stability_aggregate.csv")),
+    ]
+    endpoint_labels = {
+        ("eval", "prediction_error_rms"): "eval RMSD A",
+        ("plug", "prediction_error_rms"): "plug RMSD A",
+        ("tonb_box", "prediction_error_rms"): "TonB RMSD A",
+        ("barrel_core", "predicted_displacement_mean"): "barrel-core predicted mean A",
+        ("selection", "score"): "validation-style score",
+    }
+    rows: list[dict[str, Any]] = []
+    for selector, path in selectors:
+        for source in _read_csv(path):
+            if source.get("split") != "test":
+                continue
+            region = source.get("region", "")
+            metric = source.get("metric", "")
+            label = endpoint_labels.get((region, metric))
+            if label is None:
+                continue
+            rows.append(
+                {
+                    "selector": selector,
+                    "endpoint": label,
+                    "region": region,
+                    "metric": metric,
+                    "n_seeds": int(source.get("n_seeds") or 0),
+                    "mean": _float_or_none(source.get("mean")),
+                    "std": _float_or_none(source.get("std")),
+                    "min": _float_or_none(source.get("min")),
+                    "max": _float_or_none(source.get("max")),
+                    "source_csv": str(path),
+                }
+            )
+    return rows
+
+
+def _neural_comparison_rows(coordinate_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    methods = {
+        "cooper_tbdt_scaffold_single",
+        "cooper_tbdt_scaffold_blend",
+        "gold_balanced",
+        "gold_plug_specialist",
+        "gold_tonb_specialist",
+        "silver_pretrain_finetune",
+    }
+    rows = [
+        row
+        for row in coordinate_rows
+        if row.get("method") in methods and row.get("region") in PRIMARY_REGIONS
+    ]
+    order = {
+        "cooper_tbdt_scaffold_single": 0,
+        "gold_balanced": 1,
+        "gold_plug_specialist": 2,
+        "gold_tonb_specialist": 3,
+        "silver_pretrain_finetune": 4,
+        "cooper_tbdt_scaffold_blend": 5,
+    }
+    return sorted(rows, key=lambda row: (order.get(str(row.get("method")), 99), str(row.get("region"))))
+
+
 def _quality_flags(
     *,
     build_reports: dict[str, dict[str, Any]],
     classification_rows: list[dict[str, Any]],
     template_summary: dict[str, Any],
     split_leakage: dict[str, Any],
+    strict_input_checks: list[dict[str, Any]],
 ) -> list[dict[str, str]]:
     flags: list[dict[str, str]] = []
     for name, report in build_reports.items():
         input_pairs = int(report.get("input_pairs") or 0)
         skip_counts = report.get("skip_reason_counts") or {}
-        missing_pae = int(skip_counts.get("missing_pae_zero_edge_feature", 0))
+        missing_pae = int(skip_counts.get("missing_pae_zero_edge_feature", 0)) + int(
+            skip_counts.get("missing_pae_fallback_zero", 0)
+        )
         if input_pairs and missing_pae / input_pairs > 0.25:
             flags.append(
                 {
@@ -547,8 +813,26 @@ def _quality_flags(
                     "issue": f"PAE missing for {missing_pae}/{input_pairs} graphs; explicit zero-PAE edge features were used.",
                 }
             )
+        missing_af2 = int(skip_counts.get("missing_af2_structure", 0))
+        if missing_af2:
+            flags.append(
+                {
+                    "severity": "high",
+                    "scope": name,
+                    "issue": f"AF2 structure missing for {missing_af2}/{input_pairs} graphs.",
+                }
+            )
     if split_leakage.get("status") != "passed":
         flags.append({"severity": "high", "scope": "split", "issue": "Split-group leakage detected."})
+    for check in strict_input_checks:
+        if check.get("status") != "passed":
+            flags.append(
+                {
+                    "severity": "high",
+                    "scope": str(check.get("scope") or "strict_input_check"),
+                    "issue": f"Strict AF2/PAE input check failed: {check.get('counts')}",
+                }
+            )
     for row in classification_rows:
         if row.get("region") == "tonb_box":
             positives = int(row.get("n_positive") or 0)
@@ -612,14 +896,37 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             manifest_count_rows.extend(_counter_rows(rows, field, name))
 
     split_leakage = _split_leakage(gold_rows)
+    strict_input_checks = [
+        _strict_input_check(
+            Path(args.gold_pair_dir),
+            Path(args.af2_structure_dir),
+            Path(args.pae_dir),
+            "gold_pairs",
+        ),
+        _strict_input_check(
+            Path(args.silver_pair_dir),
+            Path(args.af2_structure_dir),
+            Path(args.pae_dir),
+            "silver_clean_pairs",
+        ),
+    ]
     graph_rows_gold, graph_summary_gold = _region_graph_summary(_graph_files(Path(args.gold_graph_dir)), "gold_graphs")
     graph_rows_silver, graph_summary_silver = _region_graph_summary(
         _graph_files(Path(args.silver_graph_dir)),
         "silver_clean_graphs",
     )
     graph_rows = graph_rows_gold + graph_rows_silver
+    displacement_bin_rows = _displacement_bin_rows(
+        _graph_files(Path(args.gold_graph_dir)),
+        "gold_graphs",
+    ) + _displacement_bin_rows(_graph_files(Path(args.silver_graph_dir)), "silver_clean_graphs")
 
     coordinate_rows, coordinate_sample_rows = _coordinate_tables(int(args.bootstrap_iter), int(args.bootstrap_seed))
+    neural_comparison_rows = _neural_comparison_rows(coordinate_rows)
+    seed_stability_rows = _seed_stability_rows(
+        Path("artifacts/tbdt_v1/seed_stability_best_selection/seed_stability_aggregate.csv")
+    )
+    selector_sensitivity_rows = _selector_sensitivity_rows()
     classification_rows = _classification_rows(Path("artifacts/tbdt_v1/external_baseline_curves/classification_curve_report.json"))
     template_summary = _template_selection_summary(Path("artifacts/tbdt_v1/template_baselines/template_baseline_selection.csv"))
 
@@ -632,6 +939,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         classification_rows=classification_rows,
         template_summary=template_summary,
         split_leakage=split_leakage,
+        strict_input_checks=strict_input_checks,
     )
 
     hash_paths = [
@@ -642,6 +950,15 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         Path("configs/data/tbdt_state.yaml"),
         Path("configs/model/gvp_tbdt_module.yaml"),
         Path("main.py"),
+        Path("src/evopoint_da/data/alignment.py"),
+        Path("src/evopoint_da/data/datamodule.py"),
+        Path("src/evopoint_da/data/dataset.py"),
+        Path("src/evopoint_da/data/features.py"),
+        Path("src/evopoint_da/data/graph.py"),
+        Path("src/evopoint_da/data/structure.py"),
+        Path("src/evopoint_da/data/tbdt.py"),
+        Path("src/evopoint_da/models/backbones/gvp.py"),
+        Path("src/evopoint_da/models/module.py"),
         Path("src/evopoint_da/pipeline/build_features_with_sasa.py"),
         Path("src/evopoint_da/pipeline/build_tbdt_state_dataset.py"),
         Path("src/evopoint_da/pipeline/build_tbdt_template_baselines.py"),
@@ -653,9 +970,22 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         Path("src/evopoint_da/pipeline/tbdt_state_eval_metrics.py"),
         Path("src/evopoint_da/pipeline/tbdt_state_eval_utils.py"),
         Path("src/evopoint_da/pipeline/eval_tbdt_classification_curves.py"),
+        Path("src/evopoint_da/pipeline/run_tbdt_seed_stability.py"),
+        Path("src/evopoint_da/pipeline/run_tbdt_report_models.py"),
         Path("src/evopoint_da/pipeline/build_tbdt_publication_report.py"),
         Path(args.test_sample_list),
         *[path for _method, _label, path, _category in _coordinate_metric_specs()],
+        Path("artifacts/tbdt_v1/seed_stability_best_selection/seed_stability_settings.json"),
+        Path("artifacts/tbdt_v1/seed_stability_best_selection/seed_stability_summary.csv"),
+        Path("artifacts/tbdt_v1/seed_stability_best_selection/seed_stability_aggregate.csv"),
+        Path("artifacts/tbdt_v1/seed_stability_best_selection/seed_stability_report.json"),
+        Path("artifacts/tbdt_v1/seed_stability_best_selection/seed_stability_report.md"),
+        Path("artifacts/tbdt_v1/report_models/report_models_report.json"),
+        Path("artifacts/tbdt_v1/report_models/report_model_summary.csv"),
+        Path("artifacts/tbdt_v1/report_models/prediction_reports/validation_calibrated_region_blend_test.json"),
+        Path("artifacts/tbdt_v1/seed_stability/seed_stability_aggregate.csv"),
+        Path("artifacts/tbdt_v1/seed_stability_best_disp1to2/seed_stability_aggregate.csv"),
+        Path("artifacts/tbdt_v1/seed_stability_best_flex/seed_stability_aggregate.csv"),
         Path("artifacts/tbdt_v1/external_baseline_curves/classification_curve_report.json"),
         Path("artifacts/tbdt_v1/template_baselines/template_baseline_report.json"),
         Path("artifacts/tbdt_v1/template_baselines/external_template_baseline_report.json"),
@@ -674,16 +1004,26 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
 
     _write_csv(out_dir / "manifest_field_counts.csv", manifest_count_rows)
     _write_csv(out_dir / "graph_region_summary.csv", graph_rows)
+    _write_csv(out_dir / "displacement_bin_summary.csv", displacement_bin_rows)
     _write_csv(out_dir / "coordinate_metrics_summary.csv", coordinate_rows)
     _write_csv(out_dir / "coordinate_sample_metrics.csv", coordinate_sample_rows)
+    _write_csv(out_dir / "neural_ablation_summary.csv", neural_comparison_rows)
     _write_csv(out_dir / "classification_metrics_summary.csv", classification_rows)
+    _write_csv(out_dir / "selector_sensitivity_summary.csv", selector_sensitivity_rows)
     _write_json(out_dir / "dataset_summary.json", {"manifests": manifest_summaries, "split_leakage": split_leakage})
+    _write_json(out_dir / "strict_input_checks.json", strict_input_checks)
     _write_json(
         out_dir / "graph_summary.json",
-        {"gold_graphs": graph_summary_gold, "silver_clean_graphs": graph_summary_silver},
+        {
+            "gold_graphs": graph_summary_gold,
+            "silver_clean_graphs": graph_summary_silver,
+            "displacement_bins": displacement_bin_rows,
+        },
     )
     _write_json(out_dir / "coordinate_metrics_summary.json", coordinate_rows)
+    _write_json(out_dir / "neural_ablation_summary.json", neural_comparison_rows)
     _write_json(out_dir / "classification_metrics_summary.json", classification_rows)
+    _write_json(out_dir / "selector_sensitivity_summary.json", selector_sensitivity_rows)
     _write_json(out_dir / "template_selection_summary.json", template_summary)
     _write_json(out_dir / "quality_flags.json", quality_flags)
     _write_json(out_dir / "reproducibility_manifest.json", reproducibility)
@@ -704,6 +1044,11 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             or row.get("category") == "external_template_baseline"
         )
         and row["region"] in PRIMARY_REGIONS
+    ]
+    primary_bins = [
+        row
+        for row in displacement_bin_rows
+        if row.get("scope") == "gold_graphs" and row.get("split") == "test" and row.get("region") in {"eval", "plug", "tonb_box"}
     ]
     primary_class = [row for row in classification_rows if row.get("region") in {"eval", "plug", "tonb_box"}]
     markdown = [
@@ -727,6 +1072,10 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "",
         f"Split leakage check: **{split_leakage['status']}**; overlapping groups: {split_leakage['n_overlapping_groups']}.",
         "",
+        "## Strict Input Checks",
+        "",
+        _markdown_table(strict_input_checks, ["scope", "pair_count", "failed_pair_checks", "status"]),
+        "",
         "## Coordinate Metrics",
         "",
         _markdown_table(
@@ -741,6 +1090,45 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
                 "sample_improvement_mean_ci95_low",
                 "sample_improvement_mean_ci95_high",
             ],
+        ),
+        "",
+        "## Single-Model Seed Stability",
+        "",
+        _markdown_table(seed_stability_rows, ["endpoint", "n_seeds", "mean", "std", "min", "max"])
+        if seed_stability_rows
+        else "Seed stability artifacts not found.",
+        "",
+        "## Selector Sensitivity",
+        "",
+        _markdown_table(
+            selector_sensitivity_rows,
+            ["selector", "endpoint", "n_seeds", "mean", "std", "min", "max"],
+        )
+        if selector_sensitivity_rows
+        else "Selector sensitivity artifacts not found.",
+        "",
+        "## Neural Ablations",
+        "",
+        _markdown_table(
+            neural_comparison_rows,
+            [
+                "label",
+                "category",
+                "region",
+                "zero_error_rms",
+                "prediction_error_rms",
+                "mse_improvement_vs_zero_fraction",
+                "predicted_displacement_mean",
+            ],
+        )
+        if neural_comparison_rows
+        else "Neural ablation artifacts not found.",
+        "",
+        "## Gold Test Displacement Bins",
+        "",
+        _markdown_table(
+            primary_bins,
+            ["region", "bin", "n_residues", "region_residue_total", "fraction"],
         ),
         "",
         "## Residue Localization",
@@ -759,8 +1147,12 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "## Artifact Paths",
         "",
         "- Coordinate summary: `coordinate_metrics_summary.csv`",
+        "- Seed stability: `../seed_stability_best_selection/seed_stability_report.md`",
+        "- Selector sensitivity: `selector_sensitivity_summary.csv`",
+        "- Displacement bins: `displacement_bin_summary.csv`",
         "- Classification summary: `classification_metrics_summary.csv`",
         "- Dataset summary: `dataset_summary.json`",
+        "- Strict input checks: `strict_input_checks.json`",
         "- Reproducibility manifest: `reproducibility_manifest.json`",
     ]
     report_md = out_dir / "publication_report.md"
@@ -771,8 +1163,13 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "publication_report_md": str(report_md),
         "manifest_summaries": manifest_summaries,
         "split_leakage": split_leakage,
+        "strict_input_checks": strict_input_checks,
         "graph_summaries": {"gold_graphs": graph_summary_gold, "silver_clean_graphs": graph_summary_silver},
         "coordinate_metric_rows": len(coordinate_rows),
+        "seed_stability_rows": len(seed_stability_rows),
+        "selector_sensitivity_rows": len(selector_sensitivity_rows),
+        "neural_comparison_rows": len(neural_comparison_rows),
+        "displacement_bin_rows": len(displacement_bin_rows),
         "classification_metric_rows": len(classification_rows),
         "template_selection_summary": template_summary,
         "quality_flags": quality_flags,

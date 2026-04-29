@@ -134,6 +134,7 @@ def compute_structural_node_features(
     neighbor_radius: float = 10.0,
     surface_sasa_threshold: float = 1.0,
     require_dssp: bool = False,
+    require_residue_match: bool = False,
 ) -> Dict[str, torch.Tensor]:
     """Compute per-residue geometric/structural features aligned to residue_ids."""
     parser = PDBParser(QUIET=True) if structure_path.lower().endswith((".pdb", ".ent")) else MMCIFParser(QUIET=True)
@@ -184,6 +185,12 @@ def compute_structural_node_features(
         dtype=np.float32,
     )
     valid_mask = np.array([rid in ca_coord_map for rid in residue_ids], dtype=bool)
+    if require_residue_match and not bool(valid_mask.all()):
+        missing = [rid for rid, is_valid in zip(residue_ids, valid_mask, strict=False) if not is_valid]
+        preview = ", ".join(missing[:8])
+        raise ValueError(
+            f"{structure_path} is missing {len(missing)}/{len(residue_ids)} requested residue IDs: {preview}"
+        )
 
     for i, rid in enumerate(residue_ids):
         s = float(per_res_sasa.get(rid, 0.0))

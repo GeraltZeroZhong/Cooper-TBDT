@@ -25,7 +25,7 @@ TBDT v1 uses paired structure records:
 
 - AF2 or AF2-like predicted structures for the starting conformation.
 - Experimental PDB structures for target-state coordinates.
-- Optional PAE JSON files for graph edges.
+- PAE JSON files for final fixed-PAE graph edges. Missing PAE may be allowed only in explicitly labeled smoke or limitation analyses.
 - Region annotations for barrel core and TBDT functional regions.
 - Optional docking manifests for secondary ligand-pose evaluation.
 
@@ -162,19 +162,19 @@ Evaluate raw AF2 / zero baseline:
 
 ```bash
 python -m evopoint_da.pipeline.eval_tbdt_state \
-  data/processed_tbdt_state_graphs \
-  --output-json artifacts/tbdt_v1/zero_region_metrics.json \
-  --output-csv artifacts/tbdt_v1/zero_region_metrics.csv
+  $(cat artifacts/tbdt_v1/test_graph_files.txt) \
+  --output-json artifacts/tbdt_v1/gold_real_test_zero_region_metrics.json \
+  --output-csv artifacts/tbdt_v1/gold_real_test_zero_region_metrics.csv
 ```
 
 Evaluate model predictions:
 
 ```bash
 python -m evopoint_da.pipeline.eval_tbdt_state \
-  data/processed_tbdt_state_graphs \
-  --predictions artifacts/tbdt_v1/predictions \
-  --output-json artifacts/tbdt_v1/model_region_metrics.json \
-  --output-csv artifacts/tbdt_v1/model_region_metrics.csv
+  $(cat artifacts/tbdt_v1/test_graph_files.txt) \
+  --predictions artifacts/tbdt_v1/report_models/predictions/validation_calibrated_region_blend_test \
+  --output-json artifacts/tbdt_v1/report_models/metrics/validation_calibrated_region_blend_test.json \
+  --output-csv artifacts/tbdt_v1/report_models/metrics/validation_calibrated_region_blend_test.csv
 ```
 
 Required metrics include `target_displacement_rms`, `prediction_error_rms`, `mse_improvement_vs_zero_fraction`, `better_than_zero_rate`, `sample_improvement_rate`, `sample_improvement_median`, `direction_cosine_mean`, `magnitude_mae`, and barrel-core predicted displacement magnitude. Interpret positive `improvement_vs_zero` as lower error than raw AF2 in that region. Use `sample_improvement_rate` and `sample_improvement_median` to avoid a few large structures dominating the residue-level aggregate.
@@ -294,11 +294,12 @@ python -m evopoint_da.pipeline.build_features_with_sasa \
   --pca_path data/pca_esmc_128.pkl \
   --af2_structure_dir data/raw_af2 \
   --pae_dir data/raw_af2 \
-  --allow-missing-pae \
   --report_path artifacts/tbdt_v1/build_gold_real_graphs_report.json
 ```
 
-Current real graph result: 134/134 graphs built, feature dimension 144, median node count 673, median edge count 10768. PAE was missing for 93 rows and was zero-filled in edge features. New graph rebuilds are strict by default; use `--allow-missing-pae` only when the missing-PAE count is reported as a limitation.
+Current real graph result after rerunning Gold PAE downloads and invalidating stale PyG graph caches: 134/134 graphs built, feature dimension 144, median node count 673, median edge count 10768, and no PAE fallback. The earlier 93/134 PAE gap came from building Gold graphs after only the seed PAE files had been downloaded; Gold now has PAE JSON coverage for all 46 training-set UniProt IDs. New graph rebuilds are strict by default; use `--allow-missing-pae` only when the missing-PAE count is reported as a limitation.
+
+The publication report now performs an independent strict input audit before table assembly. It verifies that every Gold pair and clean Silver pair maps all processed residue IDs back to the AFDB-v6 structure and that each PAE matrix can be strict-aligned by AF2 residue indices or residue IDs. Current status: Gold 134/134 passed and clean Silver 205/205 passed.
 
 Train the recommended GVP TBDT model:
 
@@ -309,44 +310,93 @@ python train.py data=tbdt_state model=gvp_tbdt_module \
   logger.save_dir=logs/tbdt_gold_gvp_scaffold_prior_v2
 ```
 
-The recommended default uses the slim GVP-TBDT loss: smooth-L1 displacement fitting with sample weights, TBDT region weights, and a weak high-pLDDT scaffold anchor. Current training uses `lr=1e-4`, no LR warmup, `coord_init_gain=0.01`, `output_scale=2.0`, and `gvp_dropout=0.05`.
+The recommended default uses the slim GVP-TBDT loss: smooth-L1 displacement fitting with sample weights, TBDT region weights, and a weak high-pLDDT scaffold anchor. Current training uses the final single-model recipe in `configs/model/gvp_tbdt_module.yaml`: `lr=3e-4`, no LR warmup, `coord_init_gain=0.01`, `output_scale=2.0`, and `gvp_dropout=0.05`.
 
 Strict split counts are train/val/test = 87/26/21 by UniProt group; `calib` reuses val because Gold has no separate calibration split. The Lightning logs keep the original training MSE/bin metrics; standalone TBDT reporting should use vector C-alpha region metrics from `eval_tbdt_state.py`.
 
-Current held-out Gold vector baselines are eval 1.811 A, plug 1.232 A, TonB box 6.881 A, and all residues 1.895 A for raw AFDB/zero displacement. The best single Gold-only checkpoints are complementary: `gold_only_balanced` is best for overall/eval, `gold_only_region` is best for plug, and `gold_only_tonb` is best for TonB box but hurts plug. The current reportable post-hoc model is therefore a region-blended model:
+### Article-facing model hierarchy
+
+Use two explicitly separated neural reporting tiers in the paper:
+
+1. **Primary neural baseline: single scaffold-prior model family.** This is one fixed GVP-TBDT training recipe with no post-hoc region switching and no test-set calibration, reported across five fixed training seeds. For the final internal freeze, use the validation-only `best-selection` checkpoint rule, where `val/disp_selection_mse = 0.7 * val/disp_1to2_mse + 0.3 * val/disp_1to5_mse`. The primary article-facing aggregate is `artifacts/tbdt_v1/seed_stability_best_selection/seed_stability_aggregate.csv`. For per-target plots that require one checkpoint, use the seed with median validation selector score, currently seed 404: `artifacts/tbdt_v1/seed_stability_best_selection/metrics/seed_404_best-selection_test.json`.
+2. **Secondary validation-calibrated region blend.** This is the best reportable coordinate candidate, but it must be described as a validation-calibrated composition, not as the primary single neural model. It uses a scaffold-prior base, a plug-region source, and a TonB-box source with only validation-derived scale choices.
+
+Checkpoint selection uses validation data only. For scaffold-prior sweeps, each candidate checkpoint is scored on Gold validation by the region-vector evaluator: the score is the mean MSE-improvement-vs-raw-AF2 over `eval`, `plug`, and `tonb_box`, minus `0.25 * max(0, barrel_core_predicted_displacement_mean - 0.05)`. Test metrics are reported only after the validation-selected checkpoint or validation-calibrated blend is fixed.
+
+Current held-out Gold vector baselines are eval 1.811 A, plug 1.232 A, TonB box 6.881 A, and all residues 1.895 A for raw AFDB/zero displacement.
+
+The final secondary blend is:
 
 ```bash
-python -m evopoint_da.pipeline.blend_tbdt_predictions \
-  --data-dir data/processed_tbdt_gold_graphs \
-  --split test \
-  --split-source metadata \
-  --base-predictions artifacts/tbdt_v1/predictions/gold_only_balanced \
-  --region-source plug=artifacts/tbdt_v1/predictions/gold_only_region \
-  --region-source tonb_box=artifacts/tbdt_v1/predictions/gold_only_tonb \
-  --auto-scale-region plug \
-  --calibration-region-source plug=artifacts/tbdt_v1/predictions/gold_only_region_val \
-  --min-calibration-residues 100 \
-  --output-dir artifacts/tbdt_v1/predictions/region_blend_plugcal_test_scripted \
-  --report-path artifacts/tbdt_v1/predictions/region_blend_plugcal_test_scripted_report.json
+python main.py --step report_models -- --force
 ```
 
-This uses no test-set scale fitting. The plug multiplier is fit on Gold validation only (`scale=1.287`, 2195 validation residues). TonB is left unscaled because the validation TonB calibration set has too few residues for a stable scalar.
+This runner trains the fixed report-facing Gold-only specialists and Silver pretrain/fine-tune model on the strict fixed-PAE graph features, exports validation/test predictions, and builds the blend. The blend uses the median-validation primary single-model checkpoint as base (`seed_404_best-selection`), a Gold plug/eval specialist for plug residues, and a Gold TonB specialist for TonB residues. It uses no test-set scale fitting. The plug multiplier is fit on Gold validation only (`scale=1.413`, 2195 validation residues). TonB is left unscaled (`scale=1.0`) because the validation TonB calibration set has too few residues for a stable scalar: 32 validation TonB residues, below the 100-residue minimum. The base model is also left unscaled.
 
-Current test vector-region results for the earlier blended model:
+Current test vector-region results for the two article-facing neural tiers:
 
-| Region | Zero RMSD A | Blend error RMSD A | MSE improvement vs zero | Residue improved rate | Sample improved rate | Median sample delta A |
-|---|---:|---:|---:|---:|---:|---:|
-| all | 1.895 | 1.881 | 1.44% | 54.2% | 95.2% | 0.024 |
-| eval | 1.811 | 1.790 | 2.31% | 52.9% | 75.0% | 0.055 |
-| plug | 1.232 | 1.218 | 2.17% | 51.5% | 78.9% | 0.016 |
-| TonB box | 6.881 | 6.798 | 2.41% | 89.2% | 86.7% | 0.343 |
-| barrel core | 1.921 | 1.904 | 1.68% | 54.9% | 85.7% | 0.022 |
+| Tier | Method | eval RMSD A | plug RMSD A | TonB RMSD A | barrel-core predicted mean A |
+|---|---|---:|---:|---:|---:|
+| baseline | raw AFDB / zero displacement | 1.811 | 1.232 | 6.881 | 0.000 |
+| primary neural baseline | single scaffold-prior model family, `best-selection`, 5-seed mean +/- std | 1.797 +/- 0.005 | 1.223 +/- 0.006 | 6.822 +/- 0.027 | 0.015 +/- 0.005 |
+| secondary validation-calibrated candidate | scaffold-prior region blend | 1.793 | 1.214 | 6.834 | 0.023 |
 
-The barrel-core predicted displacement mean is 0.152 A, so the earlier model behaved as a small scaffold correction rather than a large core deformation. Full results are in `artifacts/tbdt_v1/tbdt_test_region_metrics_summary.json` and `.csv`.
+The single model is the cleaner primary neural baseline for the main Methods and main-result claim. The region blend may be reported as a validation-calibrated coordinate candidate that improves eval/plug RMSD but does not improve TonB versus the primary single-model family. Historical Gold-only specialists, gate variants, and sweep variants should be framed as ablations or sensitivity analyses, not as independently test-selected model choices.
+
+### Scientific reporting design
+
+Do not reduce Cooper-TBDT to one model row and one scalar. The scientifically clean report should have four layers:
+
+1. **Primary single-model family.** Fixed scaffold-prior training recipe, five fixed seeds, validation-only `best-selection` checkpoint rule, Gold test only. Report mean +/- std across seeds for eval, plug, TonB box, barrel-core predicted displacement, all-residue diagnostic RMSD, sample improvement rate, and paired per-target Delta RMSD confidence intervals. This is the main neural baseline.
+2. **Endpoint families.** Report region masks and displacement bins separately. Region endpoints answer "where in the transporter"; displacement bins answer "how large is the motion." Use `<1 A` as small/noise/scaffold-dominated diagnostic, `1-2 A` as the main small functional displacement band for plug/eval, `2-5 A` as the broad functional/large local displacement band, and `>5 A` as a rare large-motion/TonB diagnostic. Do not use all-residue RMSD as a primary endpoint.
+3. **Selector sensitivity.** Report `best-selection`, `best-disp1to5`, `best-disp1to2`, and `best-flex` as validation checkpoint selector sensitivity. This is not post-hoc model shopping; it documents whether the scientific conclusion depends on choosing a small-motion, broad-motion, or large-motion selector.
+4. **Secondary validation-calibrated candidates.** Region blends and specialist sources are allowed as "best validation-calibrated coordinate candidates," but only after all component models are rerun on fixed-PAE Gold graphs and all calibration scalars are fit on Gold validation only.
+
+This structure lets the paper say: the single neural family is stable, the small functional plug/eval signal is robust, TonB large-motion remains hard and should be reported with dedicated direction/centroid metrics, and any blend improvement is secondary rather than the core claim.
+
+### Single-model seed stability
+
+The final single scaffold-prior configuration was rerun with five fixed training seeds to show sensitivity to random initialization/training order while keeping the Gold metadata split fixed (`split_seed=42`, `split_source=metadata`). Training and prediction used CUDA, `num_workers=0`, `seed_everything(seed, workers=True)`, and deterministic Trainer settings. This run is not a sweep: the architecture, loss weights, max epochs, split, and checkpoint selector are fixed before final Gold test reporting.
+
+```bash
+python main.py --step seed_stability -- \
+  --seeds 42,101,202,303,404 \
+  --max-epochs 40 \
+  --out-dir artifacts/tbdt_v1/seed_stability \
+  --study-prefix tbdt_single_scaffold_prior_seed_stability
+```
+
+Fixed configuration: `lr=3e-4`, `barrel_core_loss_weight=0.05`, `eval_region_loss_weight=2.0`, `plug_loss_weight=2.5`, `tonb_box_loss_weight=4.0`, `substrate_contact_loss_weight=4.0`, `scaffold_anchor_weight=0.2`, `scaffold_anchor_plddt_min=80`, `coord_init_gain=0.01`, `output_scale=2.0`, and `gvp_dropout=0.05`. Primary checkpoint selection is `best-selection` on validation only.
+
+Primary `best-selection` test-set seed stability:
+
+| Seed | selected epoch | eval RMSD A | plug RMSD A | TonB RMSD A | barrel-core predicted mean A |
+|---:|---:|---:|---:|---:|---:|
+| 42 | 7 | 1.795 | 1.228 | 6.788 | 0.008 |
+| 101 | 3 | 1.795 | 1.219 | 6.826 | 0.015 |
+| 202 | 7 | 1.794 | 1.214 | 6.838 | 0.015 |
+| 303 | 5 | 1.806 | 1.228 | 6.857 | 0.015 |
+| 404 | 4 | 1.796 | 1.225 | 6.803 | 0.023 |
+| mean +/- std | - | 1.797 +/- 0.005 | 1.223 +/- 0.006 | 6.822 +/- 0.027 | 0.015 +/- 0.005 |
+
+The model is stable on the primary eval, plug, and barrel-core endpoints. TonB remains consistently improved versus raw AFDB/zero displacement but should still be framed as a hard, sparse-region endpoint. Full primary-selector artifacts are in `artifacts/tbdt_v1/seed_stability_best_selection/seed_stability_report.md`, `seed_stability_summary.csv`, and `seed_stability_aggregate.csv`.
+
+Checkpoint-selector sensitivity was evaluated after fixing Gold PAE, using the same five trained seed runs and no retraining. This is a sensitivity analysis, not a new primary-model selection step.
+
+| Checkpoint selector | eval RMSD A mean +/- std | plug RMSD A mean +/- std | TonB RMSD A mean +/- std | barrel-core predicted mean A | selection score mean +/- std |
+|---|---:|---:|---:|---:|---:|
+| best-disp1to5 | 1.803 +/- 0.012 | 1.234 +/- 0.023 | 6.813 +/- 0.033 | 0.018 +/- 0.004 | 0.0086 +/- 0.0151 |
+| best-disp1to2 | 1.797 +/- 0.005 | 1.223 +/- 0.006 | 6.822 +/- 0.027 | 0.015 +/- 0.005 | 0.0155 +/- 0.0054 |
+| best-selection | 1.797 +/- 0.005 | 1.223 +/- 0.006 | 6.822 +/- 0.027 | 0.015 +/- 0.005 | 0.0155 +/- 0.0054 |
+| best-flex | 1.811 +/- 0.035 | 1.251 +/- 0.048 | 6.791 +/- 0.128 | 0.016 +/- 0.009 | -0.0022 +/- 0.0407 |
+
+`best-disp1to2` and `best-selection` selected the same checkpoints in these five runs and are slightly better than `best-disp1to5` on eval/plug/all-residue RMSD, but slightly worse on TonB RMSD. For the internal final-freeze design, use `best-selection` as the primary selector because it explicitly balances the small functional plug/eval band (`1-2 A`) with the broader functional band (`1-5 A`). Keep `best-disp1to5` as broad-band selector sensitivity and `best-flex` as a large-motion/TonB-biased sensitivity check.
+
+The early selected epochs are expected under the current Gold-only setup, but they should be reported and controlled. Across five seeds, `best-selection` picks epochs 3-7 and `best-disp1to5` picks epochs 3-10. Later epochs increase predicted displacement magnitude and validation MSE, especially on flexible residues. This is consistent with small-data overfitting and displacement over-prediction, not with undertraining. Warmup or lower learning rate may move the selected epoch later, but the decisive test is whether it improves Gold validation/test under the same selector. Recommended optimizer sensitivity for the final freeze: `lr in {1e-4, 2e-4, 3e-4}` crossed with `lr_warmup_epochs in {0, 3, 5}`, all selected on Gold validation and reported as sensitivity rather than silently replacing the main recipe.
 
 ## Loss Gate Ablation
 
-These are historical ablations that explain why the old global loss-gate machinery was removed from the active model. They were run on the Gold real graph split with the same GVP architecture, `lr=3e-4`, 40 epochs, batch size 1, and validation-selected `best-disp1to5` checkpoints.
+These are historical ablations that explain why the old global loss-gate machinery was removed from the active model. They are retained as design history only: the numeric table below was generated before the strict fixed-PAE graph/cache rebuild and is not part of the current publication reporting set. Current report-facing Gold-edge neural models are the fixed primary seed-stability family and the Gold-only specialist ablations rerun by `python main.py --step report_models -- --force`.
 
 | Variant | all RMSD A | eval RMSD A | plug RMSD A | TonB RMSD A | Notes |
 |---|---:|---:|---:|---:|---|
@@ -358,25 +408,25 @@ These are historical ablations that explain why the old global loss-gate machine
 
 No loss gate is kept in the active training module. A test blend using `focus_only` as the base, `direction_aux_only` for plug, and the existing TonB specialist gave all/eval/plug/TonB RMSD = 1.881/1.790/1.219/6.798 A, essentially tied with the previous region blend. That result was not strong enough to justify preserving the gate code path.
 
-Full ablation artifacts are in `artifacts/tbdt_v1/gate_ablation/loss_gate_ablation_summary.json` and `loss_gate_ablation_region_summary.csv`.
+The old ablation artifacts remain in `artifacts/tbdt_v1/gate_ablation/loss_gate_ablation_summary.json` and `loss_gate_ablation_region_summary.csv`, but they should not be cited as current fixed-PAE results.
 
 ## Scaffold Prior
 
 The current scientific default is a region-aware scaffold prior: AlphaFold/AFDB confidence metrics support treating high-pLDDT structured regions as reliable local backbones, while TBDT structural literature places the functional state signal mainly in plug, extracellular-loop, substrate-facing, switch/TonB-box regions rather than in a freely deforming barrel scaffold. Therefore the default GVP TBDT config sets:
 
 ```yaml
-barrel_core_loss_weight: 0.1
-eval_region_loss_weight: 1.5
-plug_loss_weight: 2.0
-tonb_box_loss_weight: 3.0
-substrate_contact_loss_weight: 3.0
-scaffold_anchor_weight: 0.05
+barrel_core_loss_weight: 0.05
+eval_region_loss_weight: 2.0
+plug_loss_weight: 2.5
+tonb_box_loss_weight: 4.0
+substrate_contact_loss_weight: 4.0
+scaffold_anchor_weight: 0.2
 scaffold_anchor_plddt_min: 80.0
 ```
 
 This down-weights supervised displacement fitting on the barrel core and adds a zero-displacement anchor only on high-confidence barrel-core residues. It avoids the earlier pLDDT L2 mistake: low-confidence flexible regions are not globally shrunk just because their pLDDT is low.
 
-The detailed scaffold-prior sweep now decomposes the mechanism into core down-weighting, scaffold-anchor strength, pLDDT anchor threshold, individual region components, and winner-focused optimizer/head/dropout settings:
+The detailed scaffold-prior sweep is a sensitivity analysis, not the article's model-selection narrative. It decomposes the mechanism into core down-weighting, scaffold-anchor strength, pLDDT anchor threshold, individual region components, and winner-focused optimizer/head/dropout settings. The early sweep directories are design-history artifacts; after the fixed-PAE graph/cache rebuild, use the fixed primary seed-stability run and `report_models` reruns for reportable neural metrics.
 
 ```bash
 python -m evopoint_da.pipeline.run_tbdt_scaffold_prior_sweep \
@@ -395,25 +445,23 @@ python -m evopoint_da.pipeline.summarize_tbdt_scaffold_prior_sweeps \
   --top-k 20
 ```
 
-The highest validation-score mechanism is TonB-only weighting plus core down-weighting and scaffold anchor (`sp17_tonb_only_anchor`). It is the cleanest mechanistic proof that the scaffold anchor can suppress barrel motion: test barrel-core predicted displacement mean is 0.0095 A. The balanced default keeps the full plug/eval/TonB/substrate-contact prior active and uses the winner-focused validation-selected configuration `sp30_region_anchor_w005_lr1e4`.
+The highest validation-score mechanism in the historical sweep was TonB-only weighting plus core down-weighting and scaffold anchor (`sp17_tonb_only_anchor`), which provided mechanistic evidence that a scaffold anchor can suppress barrel motion. The balanced validation-selected configuration `sp30_region_anchor_w005_lr1e4` motivated the final fixed recipe, but its old sweep metrics are superseded by the fixed-PAE reruns below. Full historical tables and the tradeoff plot remain in `artifacts/tbdt_v1/scaffold_prior_sweep_report/` for traceability only.
 
-Validation-selected held-out test metrics for the balanced default are eval RMSD 1.794 A, plug RMSD 1.217 A, TonB-box RMSD 6.833 A, and barrel-core predicted displacement mean 0.0266 A. Relative to the previous default (`sp06_region_anchor_w01_t80`), eval and plug improve substantially, TonB remains positive versus raw AFDB but is essentially tied/slightly lower, and the aggregate scaffold-prior score improves while keeping core movement well below 0.05 A. Full tables and the tradeoff plot are in `artifacts/tbdt_v1/scaffold_prior_sweep_report/`.
-
-Single-model test result for `tbdt_scaffold_prior_region_weighted` versus the previous no-prior baseline:
+Primary single-model result. The historical no-prior row is retained only as design context; it is not part of the current fixed-PAE reporting set.
 
 | Variant | eval RMSD A | plug RMSD A | TonB RMSD A | barrel-core predicted mean A |
 |---|---:|---:|---:|---:|
-| previous no-prior baseline | 1.798 | 1.222 | 6.832 | 0.152 |
-| scaffold prior | 1.794 | 1.221 | 6.815 | 0.034 |
+| historical no-prior baseline, pre-fixed-PAE context | 1.798 | 1.222 | 6.832 | 0.152 |
+| single scaffold-prior model family, 5-seed mean | 1.797 | 1.223 | 6.822 | 0.015 |
 
-The scaffold-prior blend uses scaffold prior as the base, the previous plug specialist for plug, and the strong scaffold-prior model for TonB:
+The secondary validation-calibrated scaffold-prior blend uses the median-validation primary checkpoint as the base, the predefined plug/eval specialist for plug residues, and the TonB specialist for TonB residues. The plug scale is validation-fit (`1.413`); TonB and base predictions are identity-scaled:
 
 | Variant | eval RMSD A | plug RMSD A | TonB RMSD A | barrel-core predicted mean A |
 |---|---:|---:|---:|---:|
-| previous blend | 1.790 | 1.218 | 6.798 | 0.152 |
-| scaffold-prior blend | 1.787 | 1.218 | 6.778 | 0.034 |
+| historical blend, pre-fixed-PAE context | 1.790 | 1.218 | 6.798 | 0.152 |
+| validation-calibrated scaffold-prior blend | 1.793 | 1.214 | 6.834 | 0.023 |
 
-This is the better scientific reporting candidate: it improves functional-region RMSD while sharply reducing barrel-core deformation. Its all-residue RMSD is not the optimization target and is less meaningful for TBDT state correction because it rewards fitting scaffold differences that should be treated as a reliable frame. Full artifacts are in `artifacts/tbdt_v1/scaffold_prior/scaffold_prior_summary.json` and `.csv`.
+This is a secondary validation-calibrated reporting candidate, not the primary single neural baseline. It improves eval/plug RMSD while keeping barrel-core deformation small, but it does not improve TonB relative to the primary single-model family. Its all-residue RMSD is not the optimization target and is less meaningful for TBDT state correction because it rewards fitting scaffold differences that should be treated as a reliable frame. Full current artifacts are in `artifacts/tbdt_v1/report_models/` and `artifacts/tbdt_v1/publication_report/`.
 
 ## Mechanistic Paired Evaluation
 
@@ -428,7 +476,7 @@ Run the detailed evaluation and report builder:
 ```bash
 python -m evopoint_da.pipeline.eval_tbdt_state \
   $(cat artifacts/tbdt_v1/test_graph_files.txt) \
-  --predictions artifacts/tbdt_v1/predictions/region_blend_scaffold_prior_test \
+  --predictions artifacts/tbdt_v1/report_models/predictions/validation_calibrated_region_blend_test \
   --output-json artifacts/tbdt_v1/mechanistic_eval/scaffold_blend_detailed_metrics.json \
   --output-csv artifacts/tbdt_v1/mechanistic_eval/scaffold_blend_detailed_metrics.csv \
   --paired-delta-csv artifacts/tbdt_v1/mechanistic_eval/scaffold_blend_paired_delta.csv \
@@ -436,14 +484,14 @@ python -m evopoint_da.pipeline.eval_tbdt_state \
 
 python -m evopoint_da.pipeline.build_tbdt_mechanistic_eval_report \
   --metric-json scaffold_blend=artifacts/tbdt_v1/mechanistic_eval/scaffold_blend_detailed_metrics.json \
-  --metric-json sp30_balanced_default=artifacts/tbdt_v1/mechanistic_eval/sp30_balanced_default_detailed_metrics.json \
+  --metric-json primary_single_seed404=artifacts/tbdt_v1/seed_stability_best_selection/metrics/seed_404_best-selection_test.json \
   --out-md artifacts/tbdt_v1/mechanistic_eval/mechanistic_eval_report.md \
   --out-csv artifacts/tbdt_v1/mechanistic_eval/mechanistic_eval_summary.csv
 ```
 
-Current scaffold blend per-target readout is directionally consistent: eval improves on 15/20 targets, plug on 15/19, plug apical loop on 14/19, TonB box on 13/15, and all residues on 18/21. Median Delta RMSD is negative for each of those regions and the Wilcoxon one-sided p-values are <0.002. The signal is stronger in `plug_apical_loop` than in `plug_core`, which confirms that whole-plug RMSD was diluting the flexible apical subregion.
+Current scaffold blend per-target readout is directionally consistent for coordinate RMSD: eval improves on 17/20 targets, plug on 16/19, plug apical loop on 14/19, TonB box on 13/15, and all residues on 18/21. Median Delta RMSD is negative for each of those regions and the Wilcoxon one-sided p-values are <=0.002. The signal is stronger in `plug_apical_loop` than in `plug_core`, which confirms that whole-plug RMSD was diluting the flexible apical subregion.
 
-TonB needs separate reporting. The scaffold blend improves TonB coordinate RMSD on 13/15 targets, but exposure-state accuracy is only 20% because most predicted TonB boxes remain `unchanged` while the target labels are buried-like or exposed-like. Direction compatibility is higher at 73%, with median TonB centroid displacement cosine 0.945. Therefore the current claim should be: TonB coordinate/direction signal is present, but TonB exposure-state compatibility is not solved.
+TonB needs separate reporting. The scaffold blend improves TonB coordinate RMSD on 13/15 targets, but exposure-state accuracy is only 20% because most predicted TonB boxes remain `unchanged` while the target labels are buried-like or exposed-like. Direction compatibility is also only 20% for the current blend, with median TonB centroid displacement cosine 0.149. Therefore the current claim should be: TonB coordinate RMSD has a weak positive signal, but TonB direction/exposure-state compatibility is not solved.
 
 Full tables are in `artifacts/tbdt_v1/mechanistic_eval/mechanistic_eval_report.md`.
 
@@ -519,6 +567,8 @@ Implemented external template baselines:
 
 Important implementation detail: these are not just external selectors followed by sequence alignment. Foldseek uses its `qaln/taln` structure alignment strings; US-align reruns pairwise alignment for the selected donor and parses the structural alignment. Both mappings are converted through processed AF2 residue indices before rotating/transferring donor displacement vectors. Same-UniProt donor leakage is excluded by default.
 
+Per-target external-tool failures abort by default. A zero-displacement failure record is allowed only when `--allow-failed-zero-fallback` is explicitly passed, and such a run should be reported as a limitation rather than mixed silently into baseline metrics.
+
 Current coordinate results on held-out Gold test:
 
 | Method | eval RMSD A | plug RMSD A | TonB RMSD A | MSE improvement vs raw AF2 on eval |
@@ -528,10 +578,11 @@ Current coordinate results on held-out Gold test:
 | US-align nearest-template transfer | 2.114 | 1.585 | 7.304 | -0.362 |
 | nearest template transfer | 2.163 | 1.713 | 6.950 | -0.427 |
 | family/state average transfer | 2.110 | 1.646 | 6.926 | -0.357 |
-| Cooper-TBDT single scaffold-prior | 1.796 | 1.231 | 6.778 | 0.017 |
-| Cooper-TBDT scaffold-prior blend | 1.787 | 1.218 | 6.778 | 0.026 |
+| Cooper-TBDT single scaffold-prior (`best-selection`, 5-seed mean) | 1.797 | 1.223 | 6.822 | 0.016 |
+| Cooper-TBDT single scaffold-prior representative seed 404 | 1.796 | 1.225 | 6.803 | 0.017 |
+| Cooper-TBDT validation-calibrated blend | 1.793 | 1.214 | 6.834 | 0.020 |
 
-Interpretation: Foldseek and US-align are important negative controls. They show that generic nearest-template structure search does not solve the coordinate endpoint, even with structure-alignment residue mapping. This is a stronger external comparison than only using an internally written template baseline.
+Interpretation: Foldseek and US-align are important negative controls. They show that generic nearest-template structure search does not solve the coordinate endpoint, even with structure-alignment residue mapping. This is a stronger external comparison than only using an internally written template baseline. In article tables, label the 5-seed `Cooper-TBDT single scaffold-prior` aggregate as the primary neural baseline, use the representative seed 404 only for per-target/paired plots, and label `Cooper-TBDT validation-calibrated blend` as the secondary candidate; the blend improves eval/plug but does not improve TonB versus the primary single-model family.
 
 Artifacts:
 
@@ -546,7 +597,7 @@ ROC/PR reporting uses a score-only task so external baselines and Cooper-TBDT pr
 ```bash
 python -m evopoint_da.pipeline.eval_tbdt_classification_curves \
   --sample-list artifacts/tbdt_v1/test_graph_files.txt \
-  --prediction cooper_tbdt_scaffold_blend=artifacts/tbdt_v1/predictions/region_blend_scaffold_prior_test \
+  --prediction cooper_tbdt_scaffold_blend=artifacts/tbdt_v1/report_models/predictions/validation_calibrated_region_blend_test \
   --score-baseline prody_anm_mobility=artifacts/tbdt_v1/external_score_baselines/prody_anm_mobility \
   --score-baseline prody_gnm_mobility=artifacts/tbdt_v1/external_score_baselines/prody_gnm_mobility \
   --score-baseline iupred2a_long=artifacts/tbdt_v1/external_score_baselines/iupred2a_long \
@@ -589,7 +640,7 @@ Current held-out test residue-shift localization results:
 
 | Region | Method | AUROC | AP |
 |---|---|---:|---:|
-| eval | Cooper-TBDT scaffold blend | 0.651 | 0.504 |
+| eval | Cooper-TBDT scaffold blend | 0.684 | 0.474 |
 | eval | AF2 low pLDDT | 0.813 | 0.676 |
 | eval | AF2 surface RSA | 0.645 | 0.428 |
 | eval | ProDy-style ANM mobility | 0.727 | 0.517 |
@@ -598,7 +649,7 @@ Current held-out test residue-shift localization results:
 | eval | P2Rank pocket-residue score | 0.535 | 0.285 |
 | eval | fpocket pocket-residue score | 0.488 | 0.293 |
 | eval | ProtCross pocket-residue score | 0.562 | 0.380 |
-| plug | Cooper-TBDT scaffold blend | 0.593 | 0.328 |
+| plug | Cooper-TBDT scaffold blend | 0.661 | 0.380 |
 | plug | AF2 low pLDDT | 0.786 | 0.590 |
 | plug | AF2 surface RSA | 0.620 | 0.337 |
 | plug | ProDy-style ANM mobility | 0.702 | 0.448 |
@@ -607,17 +658,17 @@ Current held-out test residue-shift localization results:
 | plug | P2Rank pocket-residue score | 0.578 | 0.278 |
 | plug | fpocket pocket-residue score | 0.517 | 0.281 |
 | plug | ProtCross pocket-residue score | 0.607 | 0.390 |
-| TonB box | Cooper-TBDT scaffold blend | 0.756 | 0.997 |
+| TonB box | Cooper-TBDT scaffold blend | 0.073 | 0.971 |
 | TonB box | AF2 low pLDDT | 0.128 | 0.976 |
 | TonB box | AF2 surface RSA | 0.268 | 0.984 |
 | TonB box | ProDy-style ANM mobility | 0.146 | 0.978 |
 | TonB box | ProDy-style GNM mobility | 0.183 | 0.980 |
 | TonB box | IUPred2A long disorder | 0.829 | 0.997 |
 | TonB box | P2Rank pocket-residue score | 0.768 | 0.996 |
-| TonB box | fpocket pocket-residue score | 0.598 | 0.990 |
-| TonB box | ProtCross pocket-residue score | 0.744 | 0.996 |
+| TonB box | fpocket pocket-residue score | 0.573 | 0.990 |
+| TonB box | ProtCross pocket-residue score | 0.146 | 0.978 |
 
-The TonB-box PR numbers are inflated because this held-out slice has 82 positives and only 1 negative; AUROC is the safer diagnostic for that region. For eval and plug residue localization, low AF2 pLDDT and ProDy-style ANM are strong external baselines and should be reported alongside the model. Curve images and raw points are in `artifacts/tbdt_v1/external_baseline_curves/`.
+The TonB-box PR numbers are inflated because this held-out slice has 82 positives and only 1 negative; AUROC is the safer diagnostic for that region, and the current blend is poor on TonB residue-ranking despite weakly improving TonB coordinate RMSD. For eval and plug residue localization, low AF2 pLDDT and ProDy-style ANM are strong external baselines and should be reported alongside the model. Curve images and raw points are in `artifacts/tbdt_v1/external_baseline_curves/`.
 
 ## External Baseline Feasibility Notes
 
@@ -635,6 +686,7 @@ Pocket/localization external tools:
 - ProtCross was run from `/home/zero/ProtCross`.
 
 All P2Rank, fpocket, and ProtCross score files completed successfully for the 21 held-out Gold test targets.
+Per-sample failures in these external score baselines abort by default. A zero-valued score file is allowed only with explicit `--allow-failed-zero-fallback`.
 
 ## Publication Report Bundle
 
@@ -652,8 +704,12 @@ It writes dataset summaries, split-leakage checks, graph region distributions, c
 Current report bundle status:
 
 - `coordinate_metric_rows`: 115
-- `classification_metric_rows`: 45
+- `selector_sensitivity_rows`: 20
+- `neural_comparison_rows`: 24
+- `displacement_bin_rows`: 105
+- `classification_metric_rows`: 36
 - Split leakage check: passed.
+- Strict input checks: Gold 134/134 passed; clean Silver 205/205 passed.
 - Quality flags: TonB-box ROC/PR class imbalance, low internal nearest-template target coverage, and AF2 low-pLDDT outperforming model magnitude on eval residue-localization AUROC.
 
 ## Silver/Bronze Assets And Pretraining Plan
@@ -672,13 +728,21 @@ python -m evopoint_da.pipeline.download_tbdt_manifest_assets \
 
 Current asset status: Silver has 320/320 usable rows with experimental RCSB structure and AFDB v6 model. Bronze has 598/600 usable AFDB-v6 rows; UniProt accessions `P44523` and `Q8CVJ0` have no AlphaFold model available from the AlphaFold API or AFDB v1-v6 files and should be filtered from AFDB-only pretraining.
 
-Recommended first candidate is a two-stage Silver-supervised pretrain followed by Gold fine-tuning:
+Recommended first candidate is a two-stage Silver auxiliary pretrain followed by Gold fine-tuning:
 
-1. Build Silver AFDB-to-experimental displacement pairs without TBDT-specific core alignment. Silver is beta-barrel auxiliary data, so use full-chain alignment or a generic beta-strand scaffold selector later. Keep state/substrate as unknown and use a low global label weight, e.g. 0.2-0.3.
-2. Train the same GVP backbone on Silver for geometric correction only. Do not evaluate method claims on Silver; it is an auxiliary initialization source.
-3. Fine-tune on Gold with the current TBDT region weights and metadata split. Select checkpoints only on Gold validation metrics and report only Gold held-out test metrics.
+1. Rebuild Silver with the same strict feature policy as Gold, including real PAE rather than zero-filled PAE. This is now complete for the clean Silver subset: `artifacts/tbdt_v1/build_silver_clean_real_graphs_report.json` reports 205/205 processed graphs, zero skips, zero PAE fallback, and 4 invalidated dataset caches.
+2. Use Silver as geometric/representation pretraining, not as direct TBDT state supervision. Silver rows have `state_label=unknown`, mostly no substrate, and generic beta-barrel displacement labels. They can teach AF2-to-experimental geometry correction and scaffold regularity, but they do not define plug/TonB state-change biology.
+3. Prefer either encoder pretraining or a low-weight multi-task objective (`label_weight` around 0.1-0.3), with Silver loss restricted to scaffold/high-confidence or generic geometry targets. Do not let Silver unknown-state labels train plug/TonB functional displacement directly.
+4. Fine-tune on Gold with the current TBDT region weights and metadata split. Select checkpoints only on Gold validation metrics and report only Gold held-out test metrics.
 
-Current Silver preprocessing keeps only conservative auxiliary pairs: from 293 built Silver pairs, 205 pass `pair_rmsd <= 3.0 A` and `n_residues >= 120`. These 205 graphs were rebuilt with real ESMC/PCA features in `data/processed_tbdt_silver_graphs_clean`. A 12-epoch Silver pretrain followed by Gold fine-tuning was tested, but it did not beat the Gold-only region-blended result on the held-out Gold vector metrics. Keep this path as an initialization candidate, not as the current reportable model.
+Current Silver preprocessing keeps only conservative auxiliary pairs: from 293 built Silver pairs, 205 pass `pair_rmsd <= 3.0 A` and `n_residues >= 120`. These 205 graphs were rebuilt with real ESMC/PCA, real PAE edge features, and strict AFDB-v6 structure resolution in `data/processed_tbdt_silver_graphs_clean`. A strict fixed-PAE Silver pretrain followed by Gold fine-tuning was rerun in `artifacts/tbdt_v1/report_models/`; it did not beat the Gold-only primary single-model family on held-out Gold metrics:
+
+| Model | eval RMSD A | plug RMSD A | TonB RMSD A | barrel-core predicted mean A |
+|---|---:|---:|---:|---:|
+| primary single scaffold-prior, 5-seed mean | 1.797 | 1.223 | 6.822 | 0.015 |
+| Silver pretrain -> Gold fine-tune, seed 42 | 1.803 | 1.231 | 6.829 | 0.008 |
+
+Silver can plausibly reduce early overfitting because Gold has only 87 training graphs, 26 validation graphs, and only 32 validation TonB residues. However, Silver will help only if it regularizes the encoder/scaffold geometry; naive mixing can hurt by teaching generic beta-barrel AF2 residuals instead of TBDT state changes. The clean experiment is: Silver encoder/geometric pretrain -> Gold fine-tune -> Gold validation `best-selection` checkpoint -> Gold test report, compared against the Gold-only 5-seed family with the same seeds and selectors.
 
 Bronze should not be used as ordinary zero-displacement supervision over all residues because that would train away the local state corrections. The safest weak-supervision use is scaffold-only regularization: build AFDB-only graphs, set pseudo `y_delta=0` only on high-confidence barrel/core-like residues, set loop/TonB/low-confidence residues to zero loss weight, and mix this objective at a small weight, e.g. 0.05-0.1. A better second candidate is coordinate-denoising pretraining on Bronze: perturb local coordinates and train the model to reconstruct the original AFDB scaffold only on high-confidence structural regions, then discard that head/objective before Gold fine-tuning.
 
@@ -701,6 +765,8 @@ python main.py --step structure_template_baselines -- --help
 python main.py --step coordinate_baselines -- --help
 python main.py --step external_baselines -- --help
 python main.py --step eval_classification -- --help
+python main.py --step seed_stability -- --help
+python main.py --step report_models -- --help
 python main.py --step publication_report -- --help
 ```
 

@@ -129,7 +129,7 @@ def compute_displacement_target(
     alignment_af2_indices: list[int] | np.ndarray | set[int] | tuple[int, ...] | None = None,
     alignment_holo_indices: list[int] | np.ndarray | set[int] | tuple[int, ...] | None = None,
     aligned_position_mask: list[bool] | np.ndarray | tuple[bool, ...] | None = None,
-) -> tuple[np.ndarray, list[str], np.ndarray, np.ndarray, np.ndarray, str]:
+) -> tuple[np.ndarray, list[str], np.ndarray, np.ndarray, np.ndarray, str, str]:
     """Build displacement targets from the best AF2/holo chain alignment.
 
     Optional alignment selectors restrict the Kabsch fit to stable core residues
@@ -226,4 +226,5 @@ def compute_displacement_target(
         af2_idx_np,
         holo_idx_np,
         best_af2_id,
+        best_holo_id,
     )

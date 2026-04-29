@@ -12,6 +12,7 @@ from torch_geometric.data import Data
 from evopoint_da.data.alignment import compute_displacement_target
 from evopoint_da.data.dataset import EvoPointDataset, build_split_file_lists
 from evopoint_da.data.graph import gvp_edge_scalar_dim
+from evopoint_da.data.graph import parse_pae_matrix_for_indices
 from evopoint_da.data.tbdt import (
     REGION_BARREL_CORE,
     REGION_PLUG,
@@ -28,6 +29,11 @@ from evopoint_da.pipeline.eval_tbdt_classification_curves import evaluate as eva
 from evopoint_da.pipeline.build_tbdt_template_baselines import PairSample, _transfer_prediction
 from evopoint_da.pipeline.build_tbdt_coordinate_baselines import build_baselines as build_coordinate_baselines
 from evopoint_da.pipeline.build_tbdt_external_baselines import _anm_mobility, _gnm_mobility, _parse_fpocket_info
+from evopoint_da.pipeline.build_features_with_sasa import (
+    build_uniprot_to_af2_path,
+    _metadata_af2_path,
+    _metadata_uniprot_id,
+)
 from evopoint_da.pipeline.build_tbdt_structure_template_baselines import _parse_foldseek_hits, _parse_usalign_tabular
 
 
@@ -64,16 +70,36 @@ class TBDTPipelineTests(unittest.TestCase):
         holo = coords + translation
         holo[10] += np.array([0.0, 2.5, 0.0], dtype=np.float32)
 
-        delta, residue_ids, _aligned, _af2_idx, _holo_idx, chain_id = compute_displacement_target(
+        delta, residue_ids, _aligned, _af2_idx, _holo_idx, af2_chain_id, holo_chain_id = compute_displacement_target(
             _chain(sequence, coords),
             _chain(sequence, holo),
             alignment_residue_ids={f"A_{i}" for i in range(1, 7)},
         )
 
-        self.assertEqual(chain_id, "A")
+        self.assertEqual(af2_chain_id, "A")
+        self.assertEqual(holo_chain_id, "A")
         self.assertEqual(residue_ids[10], "A_11")
         np.testing.assert_allclose(delta[:6], np.zeros((6, 3)), atol=1e-5)
         np.testing.assert_allclose(delta[10], np.array([0.0, 2.5, 0.0], dtype=np.float32), atol=1e-5)
+
+    def test_best_holo_chain_is_reported_with_multichain_inputs(self) -> None:
+        sequence = "ACDEFGHIKLMNPQRSTVWY"
+        coords = np.array([[float(i), 0.0, 0.0] for i in range(len(sequence))], dtype=np.float32)
+        decoy = "YYYYYYYYYYYYYYYYYYYY"
+        holo = coords + np.array([1.0, 2.0, -1.0], dtype=np.float32)
+
+        _delta, _residue_ids, _aligned, _af2_idx, _holo_idx, af2_chain_id, holo_chain_id = (
+            compute_displacement_target(
+                _chain(sequence, coords, chain_id="A"),
+                {
+                    **_chain(decoy, coords + 100.0, chain_id="X"),
+                    **_chain(sequence, holo, chain_id="B"),
+                },
+            )
+        )
+
+        self.assertEqual(af2_chain_id, "A")
+        self.assertEqual(holo_chain_id, "B")
 
     def test_region_annotation_builds_masks_ids_and_weights(self) -> None:
         annotation = {
@@ -156,6 +182,65 @@ class TBDTPipelineTests(unittest.TestCase):
             self.assertEqual([Path(p).name for p in split_files["val"]], ["b.pt"])
             self.assertEqual([Path(p).name for p in split_files["test"]], ["c.pt"])
             self.assertEqual(len(split_files["all"]), 3)
+
+    def test_feature_builder_resolves_afdb_v6_paths_after_stale_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            af2_dir = root / "raw_af2"
+            af2_dir.mkdir()
+            af2_path = af2_dir / "AF-P06129-F1-model_v6.pdb"
+            af2_path.write_text("HEADER TEST\n", encoding="utf-8")
+
+            mapping = build_uniprot_to_af2_path(str(af2_dir))
+
+            self.assertEqual(mapping["P06129"], str(af2_path))
+
+            sample = {
+                "metadata": {
+                    "af2_pdb": "/stale/worktree/data/raw_af2/AF-P06129-F1-model_v6.pdb",
+                    "manifest_row": {"af2_pdb": str(af2_path)},
+                }
+            }
+
+            self.assertEqual(_metadata_af2_path(sample), str(af2_path))
+
+    def test_feature_builder_resolves_silver_manifest_uniprot_and_relative_af2_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "data"
+            af2_dir = data_dir / "raw_af2"
+            af2_dir.mkdir(parents=True)
+            af2_path = af2_dir / "AF-Q48473-F1-model_v6.pdb"
+            af2_path.write_text("HEADER TEST\n", encoding="utf-8")
+
+            cwd = Path.cwd()
+            try:
+                import os
+
+                os.chdir(root)
+                sample = {
+                    "metadata": {
+                        "uniprot_id": None,
+                        "af2_pdb": "/stale/worktree/data/raw_af2/AF-Q48473-F1-model_v6.pdb",
+                        "manifest_row": {
+                            "uniprot_id": "Q48473",
+                            "af2_pdb": "raw_af2/AF-Q48473-F1-model_v6.pdb",
+                        },
+                    }
+                }
+
+                self.assertEqual(_metadata_uniprot_id(sample), "Q48473")
+                self.assertEqual(_metadata_af2_path(sample), str(af2_path))
+            finally:
+                os.chdir(cwd)
+
+    def test_strict_pae_parsing_rejects_unmappable_matrix_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pae_path = Path(tmpdir) / "bad_pae.json"
+            pae_path.write_text('{"predicted_aligned_error": [[1.0, 2.0], [3.0, 4.0]]}', encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                parse_pae_matrix_for_indices(str(pae_path), [0, 1, 2], strict=True)
 
     def test_model_tbdt_conditioning_accepts_graph_and_node_ids(self) -> None:
         batch = Data(
