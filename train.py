@@ -164,6 +164,19 @@ def main(cfg: DictConfig):
             init_checkpoint_path = os.path.join(root, init_checkpoint_path)
         checkpoint = torch.load(init_checkpoint_path, map_location="cpu", weights_only=False)
         state_dict = checkpoint.get("state_dict", checkpoint)
+        exclude_prefixes = [str(item) for item in cfg.get("init_exclude_prefixes", [])]
+        if exclude_prefixes:
+            before_count = len(state_dict)
+            state_dict = {
+                key: value
+                for key, value in state_dict.items()
+                if not any(key == prefix or key.startswith(f"{prefix}.") for prefix in exclude_prefixes)
+            }
+            print(
+                "Excluded "
+                f"{before_count - len(state_dict)} checkpoint tensors by prefix: "
+                f"{', '.join(exclude_prefixes)}"
+            )
         missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
         print(
             "Initialized model weights from "
