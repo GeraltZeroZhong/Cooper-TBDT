@@ -1,0 +1,20 @@
+name: Block local-only docs
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  block-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject tracked docs directory
+        run: |
+          if git ls-files 'docs/**' | grep -q .; then
+            echo "::error::docs/ is local-only internal evidence and must not be tracked."
+            git ls-files 'docs/**'
+            exit 1
+          fi
