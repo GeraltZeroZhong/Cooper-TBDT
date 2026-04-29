@@ -27,6 +27,7 @@ wandb/
 # Local-only internal notes and analysis markdown
 docs/
 local_handoff/
+tools/
 *.log
 
 # Python/cache artifacts
