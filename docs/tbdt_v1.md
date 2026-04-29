@@ -191,51 +191,15 @@ python -m evopoint_da.docking_eval.pipeline_cli \
   --out-dir outputs/tbdt_v1/docking_eval \
   --structure af2=receptor_af2 \
   --structure cooper_tbdt=receptor_cooper_tbdt \
-  --structure true_holo=receptor_holo \
+  --structure holo=receptor_holo \
   --rmsd-threshold 2.0 \
   --exhaustiveness 8 \
   --num-modes 9
 ```
 
-For the current Gold test split, build docking inputs from the held-out graph list and the validation-calibrated Cooper-TBDT coordinate predictions:
-
-```bash
-python main.py --step prepare_docking_manifest -- \
-  --only-overrides \
-  --ligand-override tbdt_c5i2d9_3qlb_a=EFE:A:701 \
-  --out-dir artifacts/tbdt_v1/docking_inputs_efe_only \
-  --docking-manifest data/tbdt_v1/docking_manifest_efe_only.csv \
-  --report-path artifacts/tbdt_v1/docking_inputs_efe_only/prepare_report.json
-
-python main.py --step docking_eval -- \
-  --manifest data/tbdt_v1/docking_manifest_efe_only.csv \
-  --out-dir outputs/tbdt_v1/docking_eval_efe_only \
-  --structure af2=receptor_af2 \
-  --structure cooper_tbdt=receptor_cooper_tbdt \
-  --structure true_holo=receptor_holo \
-  --rmsd-threshold 2.0 \
-  --exhaustiveness 8 \
-  --num-modes 9 \
-  --skip-failed
-```
-
 ## Redocking Gate
 
 Any pose-power claim must pass a true-holo redocking gate. If docking into the experimental holo receptor cannot recover the reference ligand pose within the declared Top-N window and RMSD threshold, the target is not valid evidence for Cooper-TBDT docking improvement. In that case, report the docking run as diagnostic only and do not claim AF2-to-Cooper-TBDT pose rescue for that target.
-
-Current held-out docking result is negative and limited. Among 21 Gold test targets, only one substrate-like target was cleanly runnable with standard Vina/Meeko/RDKit and a true-holo redocking gate: `tbdt_c5i2d9_3qlb_a` with ligand `EFE` from PDB `3QLB`. The true-holo redocking gate passes for this target, but AF2 and Cooper-TBDT both fail the pose-success endpoint:
-
-| Receptor | Top-1 pose RMSD A | Pose success, RMSD < 2 A |
-|---|---:|---:|
-| true holo | 0.258 | 1/1 |
-| raw AF2 | 8.699 | 0/1 |
-| Cooper-TBDT scaffold blend | 8.699 | 0/1 |
-
-Therefore there is currently no evidence that Cooper-TBDT significantly improves ligand docking success rate over raw AF2. The observed success-rate delta is `0.0` on the only gate-passing runnable substrate-like target. This should be reported as a limitation, not as a downstream application win.
-
-Publication placement reminder: move the docking evidence to the supplement. In the main text, docking should be mentioned only as a secondary feasibility endpoint that currently does not support a ligand pose-rescue claim. The supplement should contain the full redocking-gated protocol, the EFE-only result table, per-target ligand inclusion/exclusion reasons, command lines, output artifacts, and the cobalamin/cofactor chemistry limitation.
-
-The main feasibility bottleneck is ligand chemistry, not the absence of docking code. Most held-out ligand-bound candidates are cobalamin/cofactor-like or metal-chelated systems. The BtuB cyanocobalamin targets contain `CNC`, a large Co-containing ligand that is not well suited to the standard Vina/Meeko small-molecule workflow; other held-out HET groups are ions, detergents, spin labels, lipids, or crystallization additives. Cobalamin docking would require a separate cofactor-aware docking protocol before it can be used as fair evidence for pose rescue.
 
 ## Expansion Discovery
 
@@ -804,8 +768,6 @@ python main.py --step eval_classification -- --help
 python main.py --step seed_stability -- --help
 python main.py --step report_models -- --help
 python main.py --step publication_report -- --help
-python main.py --step prepare_docking_manifest -- --help
-python main.py --step docking_eval -- --help
 ```
 
 Deleted interfaces:
