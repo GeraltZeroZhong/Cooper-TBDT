@@ -54,7 +54,7 @@ class DeltaScoreSummary:
     p90_delta: float
     p95_delta: float
     max_delta: float
-    mean_holoshift: float
+    mean_cooper_tbdt: float
     mean_af2: float
     paired_t_stat: float
 
@@ -142,18 +142,22 @@ def summarize_top1(top1_rows: list[dict[str, str]], rmsd_col: str, threshold: fl
     ), rmsd_values
 
 
-def summarize_delta(rows: list[dict[str, str]], hs_col: str, af2_col: str) -> tuple[DeltaScoreSummary, list[float], list[float], list[float]]:
-    hs_values: list[float] = []
+def summarize_delta(
+    rows: list[dict[str, str]],
+    cooper_tbdt_col: str,
+    af2_col: str,
+) -> tuple[DeltaScoreSummary, list[float], list[float], list[float]]:
+    cooper_tbdt_values: list[float] = []
     af2_values: list[float] = []
     delta_values: list[float] = []
     for row in rows:
-        hs = safe_float(row.get(hs_col))
+        cooper_tbdt = safe_float(row.get(cooper_tbdt_col))
         af2 = safe_float(row.get(af2_col))
-        if hs is None or af2 is None:
+        if cooper_tbdt is None or af2 is None:
             continue
-        hs_values.append(hs)
+        cooper_tbdt_values.append(cooper_tbdt)
         af2_values.append(af2)
-        delta_values.append(hs - af2)
+        delta_values.append(cooper_tbdt - af2)
 
     n = len(delta_values)
     improved = [1 if d < 0 else 0 for d in delta_values]
@@ -180,10 +184,10 @@ def summarize_delta(rows: list[dict[str, str]], hs_col: str, af2_col: str) -> tu
         p90_delta=percentile(delta_values, 0.9),
         p95_delta=percentile(delta_values, 0.95),
         max_delta=max(delta_values) if delta_values else float("nan"),
-        mean_holoshift=mean(hs_values),
+        mean_cooper_tbdt=mean(cooper_tbdt_values),
         mean_af2=mean(af2_values),
         paired_t_stat=t_stat,
-    ), hs_values, af2_values, delta_values
+    ), cooper_tbdt_values, af2_values, delta_values
 
 
 def summarize_topn_success(
@@ -337,7 +341,7 @@ def build_report(
     topn_summary: dict[str, float] | None,
     first_hit_summary: dict[str, Any] | None,
     topn_valid_summary: dict[str, float] | None,
-    hs_values: list[float],
+    cooper_tbdt_values: list[float],
     af2_values: list[float],
     delta_values: list[float],
     meta: dict[str, Any],
@@ -358,12 +362,12 @@ def build_report(
         report["topn_success_and_valid"] = topn_valid_summary
     if delta_summary is not None:
         report["delta_score"] = asdict(delta_summary)
-        if hs_values and af2_values:
+        if cooper_tbdt_values and af2_values:
             report["delta_score_extra"] = {
-                "pearson_corr_holoshift_vs_af2": pearson(hs_values, af2_values),
-                "n_holoshift_better": sum(1 for h, a in zip(hs_values, af2_values) if h < a),
-                "n_af2_better": sum(1 for h, a in zip(hs_values, af2_values) if h > a),
-                "n_tied": sum(1 for h, a in zip(hs_values, af2_values) if h == a),
+                "pearson_corr_cooper_tbdt_vs_af2": pearson(cooper_tbdt_values, af2_values),
+                "n_cooper_tbdt_better": sum(1 for c, a in zip(cooper_tbdt_values, af2_values) if c < a),
+                "n_af2_better": sum(1 for c, a in zip(cooper_tbdt_values, af2_values) if c > a),
+                "n_tied": sum(1 for c, a in zip(cooper_tbdt_values, af2_values) if c == a),
                 "delta_negative_rate": sum(1 for d in delta_values if d < 0) / len(delta_values) if delta_values else float("nan"),
                 "delta_positive_rate": sum(1 for d in delta_values if d > 0) / len(delta_values) if delta_values else float("nan"),
             }

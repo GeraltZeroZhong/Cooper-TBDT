@@ -85,12 +85,12 @@ def infer_default_structure_specs(rows: list[dict[str, str]]) -> list[StructureS
     columns = set(rows[0].keys())
     candidates = {
         "af2": ["receptor_af2", "af2_receptor", "af2_pdb", "receptor_af2_pdb", "af2"],
-        "holoshift": [
-            "receptor_holoshift",
-            "holoshift_receptor",
-            "holoshift_pdb",
-            "receptor_holoshift_pdb",
-            "holoshift",
+        "cooper_tbdt": [
+            "receptor_cooper_tbdt",
+            "cooper_tbdt_receptor",
+            "cooper_tbdt_pdb",
+            "receptor_cooper_tbdt_pdb",
+            "cooper_tbdt",
         ],
     }
     specs = []
@@ -102,7 +102,7 @@ def infer_default_structure_specs(rows: list[dict[str, str]]) -> list[StructureS
         return specs
     raise ValueError(
         "Could not infer receptor columns. Pass --structure af2=receptor_af2 "
-        "--structure holoshift=receptor_holoshift, or use matching manifest column names."
+        "--structure cooper_tbdt=receptor_cooper_tbdt, or use matching manifest column names."
     )
 
 
@@ -359,10 +359,10 @@ def _build_score_rows(pose_rows: list[dict[str, Any]], structures: list[Structur
             row[f"score_{structure.label}"] = top.get("score", "")
             row[f"top1_rmsd_{structure.label}"] = top.get("rmsd", "")
             row[f"top1_success_{structure.label}"] = top.get("success_at_threshold", "")
-        if "score_holoshift" in row and "score_af2" in row:
-            hs = _float_or_none(row["score_holoshift"])
+        if "score_cooper_tbdt" in row and "score_af2" in row:
+            cooper_tbdt = _float_or_none(row["score_cooper_tbdt"])
             af2 = _float_or_none(row["score_af2"])
-            row["delta_score"] = (hs - af2) if hs is not None and af2 is not None else ""
+            row["delta_score"] = (cooper_tbdt - af2) if cooper_tbdt is not None and af2 is not None else ""
         score_rows.append(row)
     return score_rows
 
@@ -438,10 +438,10 @@ def build_pipeline_summary(
             "rmsd_threshold": cfg.rmsd_threshold,
             "topn_levels": topn_levels,
             "score_direction": "lower_better",
-            "formula": "delta_score = score_holoshift - score_af2",
+            "formula": "delta_score = score_cooper_tbdt - score_af2",
             "primary_endpoint": "ligand heavy-atom pose RMSD success against crystal reference coordinates",
             "vina_score_role": "auxiliary only; lower Vina score is not treated as pose improvement across receptor conformations",
-            "interpretation": "delta_score < 0 means lower Vina score for HoloShift, not necessarily a better pose",
+            "interpretation": "delta_score < 0 means lower Vina score for Cooper-TBDT, not necessarily a better pose",
             "redocking_reference_label": cfg.redocking_reference_label,
             "redocking_gate_topn": cfg.redocking_gate_topn,
             "structures": [asdict(structure) for structure in structures],
@@ -534,27 +534,27 @@ def build_pipeline_summary(
         }
 
     score_rows_str = [{k: str(v) for k, v in row.items()} for row in score_rows]
-    if score_rows_str and any("score_holoshift" in row and "score_af2" in row for row in score_rows_str):
-        delta_summary, hs_values, af2_values, delta_values = summarize_delta(
+    if score_rows_str and any("score_cooper_tbdt" in row and "score_af2" in row for row in score_rows_str):
+        delta_summary, cooper_tbdt_values, af2_values, delta_values = summarize_delta(
             score_rows_str,
-            hs_col="score_holoshift",
+            cooper_tbdt_col="score_cooper_tbdt",
             af2_col="score_af2",
         )
         summary["delta_score"] = asdict(delta_summary)
         summary["delta_score_extra"] = {
-            "n_holoshift_better": sum(1 for h, a in zip(hs_values, af2_values) if h < a),
-            "n_af2_better": sum(1 for h, a in zip(hs_values, af2_values) if h > a),
-            "n_tied": sum(1 for h, a in zip(hs_values, af2_values) if h == a),
+            "n_cooper_tbdt_better": sum(1 for c, a in zip(cooper_tbdt_values, af2_values) if c < a),
+            "n_af2_better": sum(1 for c, a in zip(cooper_tbdt_values, af2_values) if c > a),
+            "n_tied": sum(1 for c, a in zip(cooper_tbdt_values, af2_values) if c == a),
         }
 
-    if "af2" in summary["by_structure"] and "holoshift" in summary["by_structure"]:
+    if "af2" in summary["by_structure"] and "cooper_tbdt" in summary["by_structure"]:
         af2_success = summary["by_structure"]["af2"].get("top1_success", {}).get("success_rate")
-        hs_success = summary["by_structure"]["holoshift"].get("top1_success", {}).get("success_rate")
-        if af2_success is not None and hs_success is not None:
+        cooper_tbdt_success = summary["by_structure"]["cooper_tbdt"].get("top1_success", {}).get("success_rate")
+        if af2_success is not None and cooper_tbdt_success is not None:
             summary["success_comparison"] = {
-                "holoshift_minus_af2_success_rate": float(hs_success) - float(af2_success),
+                "cooper_tbdt_minus_af2_success_rate": float(cooper_tbdt_success) - float(af2_success),
                 "af2_success_rate": af2_success,
-                "holoshift_success_rate": hs_success,
+                "cooper_tbdt_success_rate": cooper_tbdt_success,
             }
 
     return summary
@@ -585,7 +585,7 @@ def pipeline_summary_to_markdown(summary: dict[str, Any]) -> str:
         lines += [
             "",
             "## Success Comparison",
-            f"- HoloShift - AF2 success rate: {cmp_payload['holoshift_minus_af2_success_rate']:.4f}",
+            f"- Cooper-TBDT - AF2 success rate: {cmp_payload['cooper_tbdt_minus_af2_success_rate']:.4f}",
         ]
 
     if "delta_score" in summary:

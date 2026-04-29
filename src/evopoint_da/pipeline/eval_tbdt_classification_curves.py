@@ -1,6 +1,6 @@
 """Plot residue-level ROC/PR curves for TBDT state-shift detection.
 
-This script aligns score-only external baselines with HoloShift predictions by
+This script aligns score-only external baselines with Cooper-TBDT predictions by
 turning the displacement target into a residue classification task:
 
 positive residue := ||target_delta|| >= positive_threshold
@@ -39,10 +39,18 @@ BASELINE_LABELS = {
     "af2_surface_sasa": "AF2 surface SASA",
 }
 PREDICTION_LABELS = {
-    "holoshift_scaffold_blend": "HoloShift-TBDT scaffold blend",
+    "cooper_tbdt_scaffold_blend": "Cooper-TBDT scaffold blend",
     "nearest_template": "Nearest template transfer",
     "family_state_average": "Family/state average transfer",
+    "prody_anm_mobility": "ProDy-style ANM mobility",
+    "prody_gnm_mobility": "ProDy-style GNM mobility",
+    "iupred2a_long": "IUPred2A long disorder",
+    "iupred2a_short": "IUPred2A short disorder",
+    "p2rank_pocket_score": "P2Rank pocket-residue score",
+    "fpocket_pocket_score": "fpocket pocket-residue score",
+    "protcross_pocket_score": "ProtCross pocket-residue score",
 }
+SCORE_KEYS = ("score", "scores", "mobility", "disorder", "prediction", "pred", "values")
 
 
 @dataclass(frozen=True)
@@ -77,6 +85,16 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Prediction directory to score by ||pred_delta||. May be passed multiple times. "
             "A directory is matched to samples by file stem."
+        ),
+    )
+    parser.add_argument(
+        "--score-baseline",
+        action="append",
+        default=[],
+        metavar="NAME=DIR",
+        help=(
+            "Directory of per-residue scalar score .pt files. Files are matched by sample stem and must contain "
+            "one of: score, scores, mobility, disorder, prediction, pred, values."
         ),
     )
     parser.add_argument(
@@ -146,6 +164,23 @@ def _parse_prediction_specs(specs: list[str]) -> list[tuple[str, str, Path]]:
     return parsed
 
 
+def _parse_score_specs(specs: list[str]) -> list[tuple[str, str, Path]]:
+    parsed: list[tuple[str, str, Path]] = []
+    for spec in specs:
+        if "=" not in spec:
+            raise ValueError(f"--score-baseline must use NAME=DIR format, got: {spec}")
+        name, raw_path = spec.split("=", 1)
+        name = name.strip()
+        if not name:
+            raise ValueError(f"Score baseline name is empty in: {spec}")
+        path = Path(raw_path)
+        if not path.is_dir():
+            raise FileNotFoundError(f"Score baseline directory not found: {path}")
+        label = PREDICTION_LABELS.get(name, name.replace("_", " "))
+        parsed.append((name, label, path))
+    return parsed
+
+
 def _as_1d_float(value: Any) -> torch.Tensor:
     tensor = value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
     return tensor.detach().cpu().float().reshape(-1)
@@ -200,6 +235,33 @@ def _prediction_score(prediction_dir: Path, sample_path: Path, n: int) -> torch.
         pred_path = matches[0]
     prediction = _extract_prediction(_load_pt(pred_path), sample_path.stem, n)
     return torch.linalg.vector_norm(prediction, dim=-1)
+
+
+def _score_baseline(score_dir: Path, sample_path: Path, n: int) -> torch.Tensor:
+    score_path = score_dir / f"{sample_path.stem}.pt"
+    if not score_path.exists():
+        matches = sorted(score_dir.rglob(f"{sample_path.stem}.pt"))
+        if not matches:
+            raise FileNotFoundError(f"No score file found for {sample_path.stem} in {score_dir}")
+        score_path = matches[0]
+    obj = _load_pt(score_path)
+    if isinstance(obj, torch.Tensor):
+        score = obj
+    elif isinstance(obj, dict):
+        value = None
+        for key in SCORE_KEYS:
+            if key in obj:
+                value = obj[key]
+                break
+        if value is None:
+            raise ValueError(f"Score file {score_path} has no scalar score key; expected one of {SCORE_KEYS}")
+        score = value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
+    else:
+        score = torch.as_tensor(obj)
+    score = score.detach().cpu().float().reshape(-1)
+    if score.numel() != n:
+        raise ValueError(f"Score length mismatch for {sample_path.stem}: score={score.numel()}, sample={n}")
+    return score
 
 
 def _roc_curve(y_true: np.ndarray, score: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
@@ -318,6 +380,7 @@ def _json_safe(value: Any) -> Any:
 def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     samples = _collect_samples(args.inputs, args.sample_list)
     prediction_specs = _parse_prediction_specs(args.prediction)
+    score_specs = _parse_score_specs(getattr(args, "score_baseline", []))
     baselines = list(args.external_baseline) or ["af2_low_plddt", "af2_surface_rsa"]
     regions = list(args.region) or ["eval"]
     out_dir = Path(args.out_dir)
@@ -327,6 +390,8 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     scores_by_region: dict[str, dict[str, MethodScores]] = {region: {} for region in regions}
     for region in regions:
         for name, label, _ in prediction_specs:
+            scores_by_region[region][name] = MethodScores(name=name, label=label, scores=[])
+        for name, label, _ in score_specs:
             scores_by_region[region][name] = MethodScores(name=name, label=label, scores=[])
         for baseline in baselines:
             scores_by_region[region][baseline] = MethodScores(
@@ -346,6 +411,8 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         method_scores: dict[str, torch.Tensor] = {}
         for name, _, pred_dir in prediction_specs:
             method_scores[name] = _prediction_score(pred_dir, sample_path, n)
+        for name, _, score_dir in score_specs:
+            method_scores[name] = _score_baseline(score_dir, sample_path, n)
         for baseline in baselines:
             method_scores[baseline] = _baseline_score(baseline, sample, sample_path, args)
 
@@ -504,6 +571,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "positive_definition": f"target displacement magnitude >= {float(args.positive_threshold):.3f} A",
         "regions": regions,
         "prediction_methods": [{"name": name, "path": str(path)} for name, _, path in prediction_specs],
+        "score_baselines": [{"name": name, "path": str(path)} for name, _, path in score_specs],
         "external_baselines": baselines,
         "summary": summary_rows,
         "output_files": output_files,

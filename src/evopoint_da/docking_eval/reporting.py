@@ -58,7 +58,7 @@ def to_markdown(report: dict[str, Any]) -> str:
         d = report["delta_score"]
         lines += [
             "",
-            "## Δ Vina Score (HoloShift - AF2)",
+            "## Δ Vina Score (Cooper-TBDT - AF2)",
             f"- Improvement rate (delta<0): {d['improvement_rate_percent']:.2f}% ({d['n_improved']}/{d['n_targets']})",
             f"- mean={d['mean_delta']:.4f}, median={d['median_delta']:.4f}, std={d['std_delta']:.4f}",
         ]
