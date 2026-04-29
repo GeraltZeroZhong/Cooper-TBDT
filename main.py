@@ -38,6 +38,7 @@ PIPELINE_STEPS: tuple[StepSpec, ...] = (
     StepSpec("seed_stability", "evopoint_da.pipeline.run_tbdt_seed_stability"),
     StepSpec("report_models", "evopoint_da.pipeline.run_tbdt_report_models"),
     StepSpec("publication_report", "evopoint_da.pipeline.build_tbdt_publication_report"),
+    StepSpec("prepare_docking_manifest", "evopoint_da.pipeline.prepare_tbdt_docking_manifest"),
     StepSpec("docking_eval", "evopoint_da.docking_eval.pipeline_cli"),
 )
 

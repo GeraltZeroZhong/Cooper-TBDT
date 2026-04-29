@@ -331,11 +331,20 @@ def _prepare_target_ligand(
         prepare_ligand_with_meeko(ligand_sdf, ligand_pdbqt, log_path, dry_run=True)
         return ligand_sdf, ligand_pdbqt
 
+    ligand_input_for_pdbqt = prepared_sdf
     if not cfg.reuse or not prepared_sdf.exists():
-        prepare_ligand_sdf(ligand_sdf, prepared_sdf, random_seed=cfg.ligand_seed)
+        try:
+            prepare_ligand_sdf(ligand_sdf, prepared_sdf, random_seed=cfg.ligand_seed)
+        except Exception as exc:
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    "RDKit ligand SDF preparation failed; falling back to original ligand file "
+                    f"for PDBQT preparation.\nERROR: {exc}\n\n"
+                )
+            ligand_input_for_pdbqt = ligand_sdf
     if not cfg.reuse or not ligand_pdbqt.exists():
-        prepare_ligand_with_meeko(prepared_sdf, ligand_pdbqt, log_path)
-    return prepared_sdf, ligand_pdbqt
+        prepare_ligand_with_meeko(ligand_input_for_pdbqt, ligand_pdbqt, log_path)
+    return ligand_input_for_pdbqt, ligand_pdbqt
 
 
 def _top1_by_structure(pose_rows: list[dict[str, Any]], structures: list[StructureSpec]) -> dict[str, dict[str, Any]]:
