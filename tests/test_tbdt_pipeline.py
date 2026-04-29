@@ -378,6 +378,7 @@ class TBDTPipelineTests(unittest.TestCase):
             self.assertIn("plug_apical_loop", report["aggregate_by_region"])
             self.assertIn("paired_delta_by_region", report)
             self.assertLess(report["paired_delta_by_region"]["plug"]["median_delta_rmsd_method_minus_raw"], 0.0)
+            self.assertIn("signed_rank_biserial_effect_method_lt_raw", report["paired_delta_by_region"]["plug"])
             self.assertEqual(report["tonb_state_summary"]["n_targets"], 1)
             self.assertTrue(paired_csv.exists())
             self.assertTrue(tonb_csv.exists())

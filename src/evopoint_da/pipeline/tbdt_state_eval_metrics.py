@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from scipy.stats import wilcoxon
+from scipy.stats import rankdata, wilcoxon
 
 
 def _rms_from_vectors(vectors: torch.Tensor) -> float:
@@ -51,8 +51,14 @@ def _wilcoxon_stats(deltas: list[float]) -> dict[str, float | int | str]:
             "wilcoxon_p_less_method_lt_raw": float("nan"),
             "wilcoxon_statistic_two_sided": float("nan"),
             "wilcoxon_p_two_sided": float("nan"),
+            "signed_rank_biserial_effect_method_lt_raw": float("nan"),
             "wilcoxon_status": "no_nonzero_deltas",
         }
+    ranks = rankdata([abs(value) for value in values], method="average")
+    improved_rank_sum = float(sum(rank for rank, value in zip(ranks, values) if value < 0.0))
+    worsened_rank_sum = float(sum(rank for rank, value in zip(ranks, values) if value > 0.0))
+    rank_total = improved_rank_sum + worsened_rank_sum
+    effect = (improved_rank_sum - worsened_rank_sum) / rank_total if rank_total else float("nan")
     try:
         less = wilcoxon(values, alternative="less", zero_method="wilcox")
         two = wilcoxon(values, alternative="two-sided", zero_method="wilcox")
@@ -63,6 +69,7 @@ def _wilcoxon_stats(deltas: list[float]) -> dict[str, float | int | str]:
             "wilcoxon_p_less_method_lt_raw": float("nan"),
             "wilcoxon_statistic_two_sided": float("nan"),
             "wilcoxon_p_two_sided": float("nan"),
+            "signed_rank_biserial_effect_method_lt_raw": effect,
             "wilcoxon_status": str(exc),
         }
     return {
@@ -71,6 +78,7 @@ def _wilcoxon_stats(deltas: list[float]) -> dict[str, float | int | str]:
         "wilcoxon_p_less_method_lt_raw": float(less.pvalue),
         "wilcoxon_statistic_two_sided": float(two.statistic),
         "wilcoxon_p_two_sided": float(two.pvalue),
+        "signed_rank_biserial_effect_method_lt_raw": effect,
         "wilcoxon_status": "ok",
     }
 
