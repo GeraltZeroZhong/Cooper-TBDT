@@ -1,0 +1,40 @@
+_target_: evopoint_da.models.module.EvoPointLitModule
+output_scale: 2.0
+selection_disp_1to2_weight: 0.7
+selection_disp_1to5_weight: 0.3
+in_channels: 176
+base_in_channels: 144
+use_tbdt_conditioning: true
+condition_embedding_dim: 8
+region_vocab_size: 64
+family_vocab_size: 1024
+state_vocab_size: 128
+substrate_vocab_size: 1024
+hidden_dim: 128
+num_layers: 4
+node_vector_dim: 3
+edge_scalar_dim: 26
+edge_vector_dim: 1
+gvp_vector_dim: 16
+gvp_dropout: 0.05
+lr: 1e-4
+weight_decay: 1e-6
+coord_scale: 1.0
+flexible_threshold: 1.0
+lr_warmup_epochs: 0
+barrel_core_loss_weight: 0.1
+eval_region_loss_weight: 1.5
+plug_loss_weight: 2.0
+extracellular_loop_loss_weight: 1.0
+tonb_box_loss_weight: 3.0
+substrate_contact_loss_weight: 3.0
+scaffold_anchor_weight: 0.05
+scaffold_anchor_plddt_min: 80.0
+coord_init_gain: 0.01
+eps: 1e-8
+default_total_epochs: 100
+min_scheduler_epochs: 1
+lr_start_factor: 1e-8
+disp_group_edges: [0.0, 1.0, 5.0]
+plddt_bin_edges: [0.0, 60.0, 70.0, 80.0, 90.0, 100.0]
+test_disp_bin_edges: [0.0, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0]

@@ -1,0 +1,144 @@
+{
+  "auto_metadata": {
+    "barrel_core_window_count": 16,
+    "barrel_feature_ranges": [
+      [
+        207,
+        742
+      ]
+    ],
+    "modelled_ref_range": [
+      29,
+      742
+    ],
+    "plug_ranges": []
+  },
+  "curation_status": "auto_from_rcsb_polymer_entity_features",
+  "default_chain": "A",
+  "eval_regions": [
+    "plug",
+    "extracellular_loop",
+    "tonb_box",
+    "substrate_contact"
+  ],
+  "loss_weights": {
+    "barrel_core": 0.1,
+    "default": 1.0,
+    "extracellular_loop": 2.0,
+    "plug": 2.0,
+    "substrate_contact": 3.0,
+    "tonb_box": 3.0
+  },
+  "notes": [
+    "Auto-generated from RCSB polymer entity Pfam/SIFTS metadata.",
+    "Barrel core is sampled as evenly spaced windows across the TonB-dependent receptor beta-barrel feature.",
+    "TonB box is a heuristic N-terminal modeled segment and must be manually verified before publication-grade evaluation."
+  ],
+  "organism": "",
+  "protein": "fepa_q9i527",
+  "references": [
+    {
+      "id": "5FP2",
+      "kind": "pdb"
+    },
+    {
+      "id": "Q9I527",
+      "kind": "uniprot"
+    }
+  ],
+  "regions": {
+    "barrel_core": [
+      {
+        "chain": "A",
+        "ranges": [
+          [
+            207,
+            216
+          ],
+          [
+            242,
+            251
+          ],
+          [
+            277,
+            286
+          ],
+          [
+            312,
+            321
+          ],
+          [
+            347,
+            356
+          ],
+          [
+            382,
+            391
+          ],
+          [
+            417,
+            426
+          ],
+          [
+            452,
+            461
+          ],
+          [
+            488,
+            497
+          ],
+          [
+            523,
+            532
+          ],
+          [
+            558,
+            567
+          ],
+          [
+            593,
+            602
+          ],
+          [
+            628,
+            637
+          ],
+          [
+            663,
+            672
+          ],
+          [
+            698,
+            707
+          ],
+          [
+            733,
+            742
+          ]
+        ]
+      }
+    ],
+    "extracellular_loop": [],
+    "plug": [
+      {
+        "chain": "A",
+        "ranges": []
+      }
+    ],
+    "substrate_contact": [],
+    "tonb_box": [
+      {
+        "chain": "A",
+        "ranges": [
+          [
+            29,
+            35
+          ]
+        ]
+      }
+    ]
+  },
+  "residue_id_namespace": "af2_chain_uniprot_resseq",
+  "schema_version": "tbdt_region_annotation_v1",
+  "uniprot_id": "Q9I527"
+}

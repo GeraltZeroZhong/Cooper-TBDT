@@ -1,0 +1,15 @@
+_target_: evopoint_da.data.datamodule.EvoPointDataModule
+
+# Processed graph directory built from the Gold TBDT supervised manifest.
+data_dir: ${paths.data_dir}/processed_tbdt_gold_graphs
+
+batch_size: 1
+num_workers: 0
+split_seed: 42
+split_source: metadata
+
+split_ranges:
+  train: [0.0, 0.7]
+  val: [0.7, 0.85]
+  test: [0.85, 1.0]
+  all: [0.0, 1.0]

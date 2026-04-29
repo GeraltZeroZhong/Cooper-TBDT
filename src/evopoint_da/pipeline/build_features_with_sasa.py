@@ -1,7 +1,4 @@
-"""Build graph features (ESM+PCA+structure+edge features) from processed pairs.
-
-Moved from scripts/ into src/ so the data pipeline code is colocated with project modules.
-"""
+"""Build strict TBDT GVP graph features from processed displacement pairs."""
 
 import argparse
 import glob
@@ -24,34 +21,64 @@ from evopoint_da.data.graph import (
     parse_pae_matrix_for_indices,
     parse_pae_matrix_for_residue_ids,
 )
-from evopoint_da.data.paths import DEFAULT_PDB_UNIPROT_MAPPING
 
 PLDDT_SCALE_MAX = 100.0
 SASA_SCALE_MAX = 250.0
+AA_ORDER = "ACDEFGHIKLMNPQRSTVWYX"
+TBDT_OPTIONAL_KEYS = (
+    "family_id",
+    "state_id",
+    "substrate_id",
+    "region_id",
+    "barrel_core_mask",
+    "plug_mask",
+    "extracellular_loop_mask",
+    "tonb_box_mask",
+    "substrate_contact_mask",
+    "eval_mask",
+    "loss_weight",
+    "metadata",
+)
+TBDT_NODE_KEYS = {
+    "region_id",
+    "barrel_core_mask",
+    "plug_mask",
+    "extracellular_loop_mask",
+    "tonb_box_mask",
+    "substrate_contact_mask",
+    "eval_mask",
+    "loss_weight",
+}
 
 
 def get_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Add ESM/PCA + pLDDT + SASA + KNN/PAE edge features.")
     p.add_argument("--pair_dir", default="data/processed_pairs")
     p.add_argument("--output_dir", default="data/processed_graphs")
-    p.add_argument("--esm_weights", required=True)
+    p.add_argument("--esm_weights")
     p.add_argument("--pca_path", default="data/pca_esmc_128.pkl")
     p.add_argument("--pca_dim", type=int, default=128)
+    p.add_argument(
+        "--smoke-test-features",
+        action="store_true",
+        help="Use deterministic lightweight sequence features instead of ESM/PCA. For smoke tests only.",
+    )
     p.add_argument("--k", type=int, default=16)
     p.add_argument("--fit_pca", action="store_true")
     p.add_argument("--pae_dir", default="data/raw_af2")
+    p.add_argument(
+        "--allow-missing-pae",
+        action="store_true",
+        help=(
+            "Allow missing PAE by filling the PAE edge channel with zeros. "
+            "Use only when the missing-PAE count is reported as a limitation."
+        ),
+    )
     p.add_argument("--af2_structure_dir", default="data/raw_af2")
-    p.add_argument("--mapping_file", default=DEFAULT_PDB_UNIPROT_MAPPING)
     p.add_argument("--contact_radius", type=float, default=10.0)
     p.add_argument("--surface_sasa_threshold", type=float, default=1.0)
     p.add_argument("--report_path", default="artifacts/build_features_report.json")
     return p.parse_args()
-
-
-def load_pdb_to_uniprot_mapping(mapping_file: str) -> dict[str, str]:
-    with open(mapping_file, "r", encoding="utf-8") as f:
-        raw_mapping = json.load(f)
-    return {pdb_id.upper(): uniprot_id for pdb_id, uniprot_id in raw_mapping.items()}
 
 
 def build_uniprot_to_af2_path(af2_dir: str) -> dict[str, str]:
@@ -64,7 +91,7 @@ def build_uniprot_to_af2_path(af2_dir: str) -> dict[str, str]:
 
 
 def _resolve_pae_path(pae_dir: str, uniprot_id: str | None, pair_stem: str) -> str | None:
-    """Prefer AF-<UNIPROT> naming (from get_af2.py), fallback to pair_id naming."""
+    """Prefer AF-<UNIPROT> naming, then pair_id naming."""
     candidates: list[str] = []
     if uniprot_id:
         candidates.extend([
@@ -85,14 +112,74 @@ def _resolve_pae_path(pae_dir: str, uniprot_id: str | None, pair_stem: str) -> s
     return None
 
 
+def _metadata_af2_path(sample: dict) -> str | None:
+    metadata = sample.get("metadata", {})
+    if not isinstance(metadata, dict):
+        return None
+    raw_path = metadata.get("af2_pdb")
+    if not raw_path:
+        return None
+    path = str(raw_path)
+    return path if os.path.isabs(path) else os.path.abspath(path)
+
+
+def _metadata_uniprot_id(sample: dict) -> str | None:
+    metadata = sample.get("metadata", {})
+    if isinstance(metadata, dict):
+        value = metadata.get("uniprot_id")
+        if value:
+            return str(value)
+    return None
+
+
+def _copy_optional_fields(sample: dict, n_nodes: int) -> dict:
+    copied = {}
+    for key in TBDT_OPTIONAL_KEYS:
+        if key not in sample:
+            continue
+        value = sample[key]
+        if key in TBDT_NODE_KEYS:
+            value_t = torch.as_tensor(value)
+            if value_t.dim() > 0 and value_t.size(0) != n_nodes:
+                value_t = value_t[:n_nodes]
+            copied[key] = value_t
+        else:
+            copied[key] = value
+    return copied
+
+
+def _smoke_sequence_features(sequence: str, dim: int) -> torch.Tensor:
+    """Deterministic 128-dim stand-in for ESM/PCA, reserved for smoke tests."""
+    n = len(sequence)
+    x = torch.zeros((n, dim), dtype=torch.float32)
+    aa_to_idx = {aa: i for i, aa in enumerate(AA_ORDER)}
+    if n == 0 or dim == 0:
+        return x
+
+    pos_base = min(len(AA_ORDER), dim)
+    for i, aa in enumerate(sequence):
+        x[i, aa_to_idx.get(aa.upper(), aa_to_idx["X"]) % dim] = 1.0
+        if dim > pos_base:
+            x[i, pos_base + (i % (dim - pos_base))] = 1.0
+        if dim >= 2:
+            phase = float(i) / max(1.0, float(n - 1))
+            x[i, -2] = np.sin(2.0 * np.pi * phase)
+            x[i, -1] = np.cos(2.0 * np.pi * phase)
+    return x
+
+
 def main() -> None:
     args = get_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
     files = sorted(glob.glob(os.path.join(args.pair_dir, "*.pt")))
-    extractor = ESMFeatureExtractor(model_path=args.esm_weights)
-    pca = PCAReducer(n_components=args.pca_dim)
-    pdb_to_uniprot = load_pdb_to_uniprot_mapping(args.mapping_file)
+    if args.smoke_test_features and args.fit_pca:
+        raise ValueError("--smoke-test-features cannot be combined with --fit_pca.")
+    if not args.smoke_test_features and not args.esm_weights:
+        raise ValueError("--esm_weights is required unless --smoke-test-features is set.")
+
+    extractor = None if args.smoke_test_features else ESMFeatureExtractor(model_path=args.esm_weights)
+    pca = None if args.smoke_test_features else PCAReducer(n_components=args.pca_dim)
     uniprot_to_af2_path = build_uniprot_to_af2_path(args.af2_structure_dir)
     af2_casefold = {k.lower(): v for k, v in uniprot_to_af2_path.items()}
 
@@ -100,10 +187,13 @@ def main() -> None:
         buf = []
         for f in tqdm(files, desc="Fitting PCA", unit="file"):
             d = torch.load(f, weights_only=True)
+            if extractor is None:
+                raise RuntimeError("Internal error: smoke-test feature mode should not fit PCA.")
             buf.append(extractor.extract_residue_embeddings(d["sequence"]))
+        assert pca is not None
         pca.fit(buf)
         pca.save(args.pca_path)
-    else:
+    elif pca is not None:
         pca.load(args.pca_path)
 
     skip_reasons: Counter[str] = Counter()
@@ -116,16 +206,20 @@ def main() -> None:
     for f in tqdm(files, desc="Building graph features", unit="file"):
         d = torch.load(f, weights_only=True)
         stem = d["pair_id"]
-        emb = extractor.extract_residue_embeddings(d["sequence"])
-        x_esm = pca.transform(emb)
+        if args.smoke_test_features:
+            x_esm = _smoke_sequence_features(d["sequence"], args.pca_dim)
+        else:
+            assert extractor is not None and pca is not None
+            emb = extractor.extract_residue_embeddings(d["sequence"])
+            x_esm = pca.transform(emb)
 
-        uniprot_id = pdb_to_uniprot.get(stem.upper())
-        af2_file = None
+        uniprot_id = _metadata_uniprot_id(d)
+        af2_file = _metadata_af2_path(d)
         if uniprot_id:
-            af2_file = uniprot_to_af2_path.get(uniprot_id) or af2_casefold.get(uniprot_id.lower())
+            af2_file = af2_file or uniprot_to_af2_path.get(uniprot_id) or af2_casefold.get(uniprot_id.lower())
 
-        if not af2_file:
-            print(f"[debug] Skip {stem}: AF2 structure not found via mapping file")
+        if not af2_file or not os.path.exists(af2_file):
+            print(f"[debug] Skip {stem}: AF2 structure not found from sample metadata or AFDB directory")
             skip_reasons["missing_af2_structure"] += 1
             continue
 
@@ -137,18 +231,16 @@ def main() -> None:
         )
 
         plddt_raw = d["plddt"].float()
-        if plddt_raw.size(0) != x_esm.size(0):
-            min_len = min(int(plddt_raw.size(0)), int(x_esm.size(0)))
-            if min_len <= 0:
-                skip_reasons["invalid_zero_length"] += 1
-                continue
-            plddt_raw = plddt_raw[:min_len]
-            x_esm = x_esm[:min_len]
-            structural = {k: v[:min_len] for k, v in structural.items()}
-            d["af2_pos"] = d["af2_pos"][:min_len]
-            d["y_delta"] = d["y_delta"][:min_len]
-            d["residue_ids"] = d["residue_ids"][:min_len]
-            skip_reasons["length_mismatch_truncated"] += 1
+        expected_n = int(x_esm.size(0))
+        lengths = {
+            "plddt": int(plddt_raw.size(0)),
+            "af2_pos": int(d["af2_pos"].size(0)),
+            "y_delta": int(d["y_delta"].size(0)),
+            "residue_ids": len(d["residue_ids"]),
+        }
+        mismatched = {key: value for key, value in lengths.items() if value != expected_n}
+        if mismatched:
+            raise ValueError(f"{stem} has inconsistent node counts: sequence={expected_n}, mismatched={mismatched}")
 
         sasa = (structural["sasa"].float() / SASA_SCALE_MAX).clamp(0.0, 1.0)
         rsa = structural["rsa"].float().clamp(0.0, 1.0)
@@ -175,7 +267,12 @@ def main() -> None:
 
         pae_path = _resolve_pae_path(args.pae_dir, uniprot_id, stem)
         if pae_path is None:
-            skip_reasons["missing_pae_fallback_zero"] += 1
+            if not args.allow_missing_pae:
+                raise FileNotFoundError(
+                    f"Missing PAE for {stem}. Provide PAE files in {args.pae_dir} or pass "
+                    "--allow-missing-pae to explicitly use zero PAE edge features."
+                )
+            skip_reasons["missing_pae_zero_edge_feature"] += 1
         if "af2_indices" in d:
             pae = parse_pae_matrix_for_indices(pae_path, [int(i) for i in d["af2_indices"].tolist()])
         else:
@@ -196,6 +293,7 @@ def main() -> None:
             "edge_s": edge_s,
             "edge_v": edge_v,
         }
+        out.update(_copy_optional_fields(d, int(x.size(0))))
         torch.save(out, os.path.join(args.output_dir, f"{stem}.pt"))
         processed_count += 1
         feature_dims.append(int(x.size(1)))
@@ -209,6 +307,7 @@ def main() -> None:
         "processed_graphs": processed_count,
         "skipped_pairs": int(len(files) - processed_count),
         "skip_reason_counts": dict(skip_reasons),
+        "smoke_test_features": bool(args.smoke_test_features),
         "feature_dim_unique": sorted(set(feature_dims)),
         "node_count_stats": {
             "mean": float(np.mean(node_counts)) if node_counts else None,

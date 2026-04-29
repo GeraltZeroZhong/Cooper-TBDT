@@ -2,8 +2,8 @@
 
 defaults:
   - _self_
-  - data: protein_displacement
-  - model: egnn_module
+  - data: tbdt_state
+  - model: gvp_tbdt_module
   - trainer: default
   - logger: csv
 

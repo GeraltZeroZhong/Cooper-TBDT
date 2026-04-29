@@ -40,40 +40,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out-top1-csv", type=Path, default=None)
     p.add_argument("--out-metrics-csv", type=Path, default=None)
     p.add_argument("--out-target-csv", type=Path, default=None)
-    p.add_argument(
-        "--calibration-json",
-        type=Path,
-        default=None,
-        help="Optional JSON output from pipeline/eval_run.py to merge into a unified report.",
-    )
     p.add_argument("--run-id", default=None, help="Optional experiment run identifier for traceability.")
     p.add_argument("--ckpt-id", default=None, help="Optional checkpoint identifier/path for traceability.")
     p.add_argument("--split-seed", type=int, default=None, help="Optional split seed used in experiment.")
     return p.parse_args()
-
-
-def _load_json(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _extract_calibration_section(payload: dict[str, Any]) -> dict[str, Any]:
-    keep_keys = [
-        "alpha",
-        "target_coverage",
-        "num_calibration_nodes",
-        "qhat",
-        "score_quantiles",
-        "estimated_empirical_coverage",
-        "calibration_quality",
-        "tail_risk",
-        "bootstrap_ci95",
-        "stratified_by_plddt",
-        "stratified_by_displacement",
-        "runtime_cost",
-        "multi_seed",
-        "drift_check",
-    ]
-    return {k: payload[k] for k in keep_keys if k in payload}
 
 
 def main() -> None:
@@ -180,27 +150,6 @@ def main() -> None:
         "split_seed": args.split_seed,
     }
     report["traceability_meta"] = {k: v for k, v in traceability_meta.items() if v is not None}
-
-    if args.calibration_json is not None:
-        calibration_payload = _load_json(args.calibration_json)
-        report["calibration_section"] = _extract_calibration_section(calibration_payload)
-
-        cross_links: dict[str, Any] = {}
-        if "top1_success" in report and "calibration_section" in report:
-            top1_success = report["top1_success"].get("success_rate")
-            tail_risk_2a = report["calibration_section"].get("tail_risk", {}).get("error_gt_2.0A_rate")
-            qhat = report["calibration_section"].get("qhat")
-            if top1_success is not None:
-                cross_links["top1_success_rate"] = top1_success
-            if tail_risk_2a is not None:
-                cross_links["calib_error_gt_2A_rate"] = tail_risk_2a
-            if qhat is not None:
-                cross_links["calib_qhat"] = qhat
-            if top1_success is not None and tail_risk_2a is not None:
-                cross_links["risk_success_gap"] = float(top1_success) - float(tail_risk_2a)
-
-        if cross_links:
-            report["cross_links"] = cross_links
 
     print(json.dumps(report, indent=2, ensure_ascii=False))
 
