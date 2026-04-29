@@ -3,9 +3,9 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "evopoint-da"
+name = "cooper-tbdt"
 version = "0.1.0"
-description = "HoloShift-TBDT state-conditioned transporter displacement benchmark."
+description = "Cooper-TBDT state-conditioned transporter displacement benchmark."
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 
@@ -22,3 +22,7 @@ docking = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["artifacts", "checkpoints", "logs", "val_metrics"]

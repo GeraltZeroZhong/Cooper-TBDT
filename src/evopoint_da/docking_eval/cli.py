@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--rank-col", default="rank")
     p.add_argument("--pose-score-col", default=None)
     p.add_argument("--score-direction", choices=["lower_better", "higher_better"], default="lower_better")
-    p.add_argument("--holoshift-score-col", default="score_holoshift")
+    p.add_argument("--cooper-tbdt-score-col", default="score_cooper_tbdt")
     p.add_argument("--af2-score-col", default="score_af2")
     p.add_argument("--rmsd-threshold", type=float, default=2.0)
     p.add_argument("--bootstrap-iter", type=int, default=2000)
@@ -63,7 +63,7 @@ def main() -> None:
     first_hit_summary = None
     topn_valid_summary = None
     rmsd_values: list[float] = []
-    hs_values: list[float] = []
+    cooper_tbdt_values: list[float] = []
     af2_values: list[float] = []
     delta_values: list[float] = []
 
@@ -116,10 +116,10 @@ def main() -> None:
 
     if args.score_file is not None:
         score_rows = read_table(args.score_file)
-        assert_columns(score_rows, [args.target_col, args.holoshift_score_col, args.af2_score_col], "score-file")
-        delta_summary, hs_values, af2_values, delta_values = summarize_delta(
+        assert_columns(score_rows, [args.target_col, args.cooper_tbdt_score_col, args.af2_score_col], "score-file")
+        delta_summary, cooper_tbdt_values, af2_values, delta_values = summarize_delta(
             rows=score_rows,
-            hs_col=args.holoshift_score_col,
+            cooper_tbdt_col=args.cooper_tbdt_score_col,
             af2_col=args.af2_score_col,
         )
 
@@ -130,7 +130,7 @@ def main() -> None:
         topn_summary=topn_summary,
         first_hit_summary=first_hit_summary,
         topn_valid_summary=topn_valid_summary,
-        hs_values=hs_values,
+        cooper_tbdt_values=cooper_tbdt_values,
         af2_values=af2_values,
         delta_values=delta_values,
         meta={
@@ -138,8 +138,8 @@ def main() -> None:
             "bootstrap_iter": args.bootstrap_iter,
             "seed": args.seed,
             "score_direction": args.score_direction,
-            "formula": "delta_score = score_holoshift - score_af2",
-            "interpretation": "lower score is better; delta < 0 means HoloShift improved over AF2",
+            "formula": "delta_score = score_cooper_tbdt - score_af2",
+            "interpretation": "lower score is better; delta < 0 means Cooper-TBDT improved over AF2",
             "topn_levels": topn_levels,
         },
         target_metrics=target_metrics,

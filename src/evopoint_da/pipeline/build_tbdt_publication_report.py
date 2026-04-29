@@ -266,12 +266,23 @@ def _bootstrap_ci(values: list[float], *, n_iter: int, seed: int) -> tuple[float
 
 def _coordinate_metric_specs() -> list[tuple[str, str, Path, str]]:
     return [
-        ("raw_af2_zero", "Raw AF2 / zero displacement", Path("artifacts/tbdt_v1/gold_real_test_zero_region_metrics.json"), "baseline"),
         (
-            "holoshift_scaffold_blend",
-            "HoloShift-TBDT scaffold blend",
-            Path("artifacts/tbdt_v1/scaffold_prior/region_blend_scaffold_prior_region_metrics.json"),
-            "primary_model",
+            "raw_af2_zero",
+            "Raw AF2 / zero displacement",
+            Path("artifacts/tbdt_v1/gold_real_test_zero_region_metrics.json"),
+            "baseline",
+        ),
+        (
+            "foldseek_nearest_template",
+            "Foldseek nearest-template transfer",
+            Path("artifacts/tbdt_v1/template_baselines/foldseek_nearest_template_region_metrics.json"),
+            "external_template_baseline",
+        ),
+        (
+            "usalign_nearest_template",
+            "US-align nearest-template transfer",
+            Path("artifacts/tbdt_v1/template_baselines/usalign_nearest_template_region_metrics.json"),
+            "external_template_baseline",
         ),
         (
             "nearest_template",
@@ -284,6 +295,90 @@ def _coordinate_metric_specs() -> list[tuple[str, str, Path, str]]:
             "Family/state average transfer",
             Path("artifacts/tbdt_v1/template_baselines/family_state_average_region_metrics.json"),
             "template_baseline",
+        ),
+        (
+            "cooper_tbdt_scaffold_single",
+            "Cooper-TBDT single scaffold-prior",
+            Path("artifacts/tbdt_v1/scaffold_prior/scaffold_region_weighted_strong_disp1to5_region_metrics.json"),
+            "primary_model",
+        ),
+        (
+            "cooper_tbdt_scaffold_blend",
+            "Cooper-TBDT scaffold-prior blend",
+            Path("artifacts/tbdt_v1/scaffold_prior/region_blend_scaffold_prior_region_metrics.json"),
+            "primary_model",
+        ),
+        (
+            "global_region_mean",
+            "Global region-mean displacement",
+            Path("artifacts/tbdt_v1/coordinate_baselines/global_region_mean_region_metrics.json"),
+            "coordinate_baseline",
+        ),
+        (
+            "family_region_mean",
+            "Family region-mean displacement",
+            Path("artifacts/tbdt_v1/coordinate_baselines/family_region_mean_region_metrics.json"),
+            "coordinate_baseline",
+        ),
+        (
+            "state_region_mean",
+            "State region-mean displacement",
+            Path("artifacts/tbdt_v1/coordinate_baselines/state_region_mean_region_metrics.json"),
+            "coordinate_baseline",
+        ),
+        (
+            "family_state_region_mean",
+            "Family/state region-mean displacement",
+            Path("artifacts/tbdt_v1/coordinate_baselines/family_state_region_mean_region_metrics.json"),
+            "coordinate_baseline",
+        ),
+        (
+            "region_centroid_shift",
+            "Rigid region centroid shift",
+            Path("artifacts/tbdt_v1/coordinate_baselines/region_centroid_shift_region_metrics.json"),
+            "coordinate_baseline",
+        ),
+        (
+            "family_region_centroid_shift",
+            "Family rigid region centroid shift",
+            Path("artifacts/tbdt_v1/coordinate_baselines/family_region_centroid_shift_region_metrics.json"),
+            "coordinate_baseline",
+        ),
+        (
+            "state_region_centroid_shift",
+            "State rigid region centroid shift",
+            Path("artifacts/tbdt_v1/coordinate_baselines/state_region_centroid_shift_region_metrics.json"),
+            "coordinate_baseline",
+        ),
+        (
+            "family_state_region_centroid_shift",
+            "Family/state rigid region centroid shift",
+            Path("artifacts/tbdt_v1/coordinate_baselines/family_state_region_centroid_shift_region_metrics.json"),
+            "coordinate_baseline",
+        ),
+        (
+            "plug_rigid_shift",
+            "Plug-only rigid shift",
+            Path("artifacts/tbdt_v1/coordinate_baselines/plug_rigid_shift_region_metrics.json"),
+            "coordinate_baseline",
+        ),
+        (
+            "plug_apical_loop_rigid_shift",
+            "Plug apical-loop-only rigid shift",
+            Path("artifacts/tbdt_v1/coordinate_baselines/plug_apical_loop_rigid_shift_region_metrics.json"),
+            "coordinate_baseline",
+        ),
+        (
+            "tonb_box_rigid_shift",
+            "TonB-box-only rigid shift",
+            Path("artifacts/tbdt_v1/coordinate_baselines/tonb_box_rigid_shift_region_metrics.json"),
+            "coordinate_baseline",
+        ),
+        (
+            "barrel_frame_ridge",
+            "Barrel-frame ridge baseline",
+            Path("artifacts/tbdt_v1/coordinate_baselines/barrel_frame_ridge_region_metrics.json"),
+            "coordinate_baseline",
         ),
         (
             "gold_only_balanced",
@@ -478,7 +573,7 @@ def _quality_flags(
             }
         )
     eval_rows = [row for row in classification_rows if row.get("region") == "eval"]
-    model = next((row for row in eval_rows if row.get("method") == "holoshift_scaffold_blend"), None)
+    model = next((row for row in eval_rows if row.get("method") == "cooper_tbdt_scaffold_blend"), None)
     plddt = next((row for row in eval_rows if row.get("method") == "af2_low_plddt"), None)
     if model and plddt and float(plddt.get("auroc") or 0.0) > float(model.get("auroc") or 0.0):
         flags.append(
@@ -550,6 +645,9 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         Path("src/evopoint_da/pipeline/build_features_with_sasa.py"),
         Path("src/evopoint_da/pipeline/build_tbdt_state_dataset.py"),
         Path("src/evopoint_da/pipeline/build_tbdt_template_baselines.py"),
+        Path("src/evopoint_da/pipeline/build_tbdt_structure_template_baselines.py"),
+        Path("src/evopoint_da/pipeline/build_tbdt_coordinate_baselines.py"),
+        Path("src/evopoint_da/pipeline/build_tbdt_external_baselines.py"),
         Path("src/evopoint_da/pipeline/eval_tbdt_state.py"),
         Path("src/evopoint_da/pipeline/tbdt_state_eval_core.py"),
         Path("src/evopoint_da/pipeline/tbdt_state_eval_metrics.py"),
@@ -560,6 +658,9 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         *[path for _method, _label, path, _category in _coordinate_metric_specs()],
         Path("artifacts/tbdt_v1/external_baseline_curves/classification_curve_report.json"),
         Path("artifacts/tbdt_v1/template_baselines/template_baseline_report.json"),
+        Path("artifacts/tbdt_v1/template_baselines/external_template_baseline_report.json"),
+        Path("artifacts/tbdt_v1/coordinate_baselines/coordinate_baseline_report.json"),
+        Path("artifacts/tbdt_v1/external_score_baselines/external_score_baseline_report.json"),
     ]
     reproducibility = {
         "python": platform.python_version(),
@@ -590,12 +691,23 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     primary_coord = [
         row
         for row in coordinate_rows
-        if row["method"] in {"raw_af2_zero", "holoshift_scaffold_blend", "nearest_template", "family_state_average"}
+        if (
+            row["method"]
+            in {
+                "raw_af2_zero",
+                "cooper_tbdt_scaffold_single",
+                "cooper_tbdt_scaffold_blend",
+                "nearest_template",
+                "family_state_average",
+            }
+            or row.get("category") == "coordinate_baseline"
+            or row.get("category") == "external_template_baseline"
+        )
         and row["region"] in PRIMARY_REGIONS
     ]
     primary_class = [row for row in classification_rows if row.get("region") in {"eval", "plug", "tonb_box"}]
     markdown = [
-        "# HoloShift-TBDT v1 Publication Report",
+        "# Cooper-TBDT v1 Publication Report",
         "",
         "## Dataset",
         "",

@@ -19,13 +19,13 @@ from evopoint_da.docking_eval.vina_runner import parse_vina_pdbqt_scores, write_
 
 class DockingPipelineHelperTests(unittest.TestCase):
     def test_parse_structure_specs(self) -> None:
-        specs = parse_structure_specs(["af2=receptor_af2", "holoshift=receptor_hs"])
-        self.assertEqual(specs, [StructureSpec("af2", "receptor_af2"), StructureSpec("holoshift", "receptor_hs")])
+        specs = parse_structure_specs(["af2=receptor_af2", "cooper_tbdt=receptor_hs"])
+        self.assertEqual(specs, [StructureSpec("af2", "receptor_af2"), StructureSpec("cooper_tbdt", "receptor_hs")])
 
     def test_infer_default_structure_specs(self) -> None:
-        rows = [{"target_id": "A", "receptor_af2": "a.pdb", "receptor_holoshift": "b.pdb"}]
+        rows = [{"target_id": "A", "receptor_af2": "a.pdb", "receptor_cooper_tbdt": "b.pdb"}]
         specs = infer_default_structure_specs(rows)
-        self.assertEqual([spec.label for spec in specs], ["af2", "holoshift"])
+        self.assertEqual([spec.label for spec in specs], ["af2", "cooper_tbdt"])
 
     def test_parse_vina_scores(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -69,7 +69,7 @@ class DockingPipelineHelperTests(unittest.TestCase):
             self.assertIn("center_x = 1.000", path.read_text(encoding="utf-8"))
 
     def test_build_pipeline_summary_compares_success_and_scores(self) -> None:
-        structures = [StructureSpec("af2", "receptor_af2"), StructureSpec("holoshift", "receptor_holoshift")]
+        structures = [StructureSpec("af2", "receptor_af2"), StructureSpec("cooper_tbdt", "receptor_cooper_tbdt")]
         cfg = DockingPipelineConfig(
             manifest=Path("manifest.csv"),
             output_dir=Path("out"),
@@ -78,18 +78,18 @@ class DockingPipelineHelperTests(unittest.TestCase):
         )
         pose_rows = [
             {"target_id": "A", "structure": "af2", "rank": 1, "score": -6.0, "rmsd": 3.0, "pose_valid": 1},
-            {"target_id": "A", "structure": "holoshift", "rank": 1, "score": -8.0, "rmsd": 1.0, "pose_valid": 1},
+            {"target_id": "A", "structure": "cooper_tbdt", "rank": 1, "score": -8.0, "rmsd": 1.0, "pose_valid": 1},
             {"target_id": "B", "structure": "af2", "rank": 1, "score": -5.0, "rmsd": 2.5, "pose_valid": 1},
-            {"target_id": "B", "structure": "holoshift", "rank": 1, "score": -7.0, "rmsd": 1.5, "pose_valid": 1},
+            {"target_id": "B", "structure": "cooper_tbdt", "rank": 1, "score": -7.0, "rmsd": 1.5, "pose_valid": 1},
         ]
         score_rows = [
-            {"target_id": "A", "score_af2": -6.0, "score_holoshift": -8.0},
-            {"target_id": "B", "score_af2": -5.0, "score_holoshift": -7.0},
+            {"target_id": "A", "score_af2": -6.0, "score_cooper_tbdt": -8.0},
+            {"target_id": "B", "score_af2": -5.0, "score_cooper_tbdt": -7.0},
         ]
         summary = build_pipeline_summary(pose_rows, score_rows, structures, cfg, failures=[])
         self.assertEqual(summary["by_structure"]["af2"]["top1_success"]["n_success"], 0)
-        self.assertEqual(summary["by_structure"]["holoshift"]["top1_success"]["n_success"], 2)
-        self.assertAlmostEqual(summary["success_comparison"]["holoshift_minus_af2_success_rate"], 1.0)
+        self.assertEqual(summary["by_structure"]["cooper_tbdt"]["top1_success"]["n_success"], 2)
+        self.assertAlmostEqual(summary["success_comparison"]["cooper_tbdt_minus_af2_success_rate"], 1.0)
         self.assertEqual(summary["delta_score"]["n_improved"], 2)
 
     def test_dry_run_pipeline_writes_planned_outputs_without_tools(self) -> None:
@@ -115,7 +115,7 @@ class DockingPipelineHelperTests(unittest.TestCase):
             manifest.write_text(
                 "\n".join(
                     [
-                        "target_id,receptor_af2,receptor_holoshift,ligand_sdf,reference_ligand_sdf,center_x,center_y,center_z,size_x,size_y,size_z",
+                        "target_id,receptor_af2,receptor_cooper_tbdt,ligand_sdf,reference_ligand_sdf,center_x,center_y,center_z,size_x,size_y,size_z",
                         "T1,receptor.pdb,receptor.pdb,ligand.sdf,ligand.sdf,0,0,0,20,20,20",
                     ]
                 )
@@ -125,7 +125,7 @@ class DockingPipelineHelperTests(unittest.TestCase):
             cfg = DockingPipelineConfig(
                 manifest=manifest,
                 output_dir=root / "out",
-                structures=[StructureSpec("af2", "receptor_af2"), StructureSpec("holoshift", "receptor_holoshift")],
+                structures=[StructureSpec("af2", "receptor_af2"), StructureSpec("cooper_tbdt", "receptor_cooper_tbdt")],
                 dry_run=True,
             )
             summary = run_docking_pipeline(cfg)

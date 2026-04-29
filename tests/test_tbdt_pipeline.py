@@ -24,7 +24,11 @@ from evopoint_da.data.tbdt import (
 )
 from evopoint_da.models.module import EvoPointLitModule
 from evopoint_da.pipeline.eval_tbdt_state import evaluate
+from evopoint_da.pipeline.eval_tbdt_classification_curves import evaluate as evaluate_classification_curves
 from evopoint_da.pipeline.build_tbdt_template_baselines import PairSample, _transfer_prediction
+from evopoint_da.pipeline.build_tbdt_coordinate_baselines import build_baselines as build_coordinate_baselines
+from evopoint_da.pipeline.build_tbdt_external_baselines import _anm_mobility, _gnm_mobility, _parse_fpocket_info
+from evopoint_da.pipeline.build_tbdt_structure_template_baselines import _parse_foldseek_hits, _parse_usalign_tabular
 
 
 def _chain(sequence: str, coords: np.ndarray, chain_id: str = "A") -> dict:
@@ -327,6 +331,212 @@ class TBDTPipelineTests(unittest.TestCase):
         self.assertIsNotNone(transfer)
         torch.testing.assert_close(transfer["prediction"], expected_delta, atol=1e-5, rtol=1e-5)
         self.assertEqual(transfer["fit_region"], "barrel_core")
+
+    def test_coordinate_baselines_fit_train_val_and_predict_test_without_leakage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "graphs"
+            out_dir = root / "baselines"
+            data_dir.mkdir()
+
+            pos = torch.tensor(
+                [
+                    [1.0, 0.0, -1.0],
+                    [0.0, 1.0, 0.0],
+                    [-1.0, 0.0, 1.0],
+                    [0.0, -1.0, 0.0],
+                    [2.0, 0.0, 1.0],
+                    [0.0, 2.0, 1.5],
+                ],
+                dtype=torch.float32,
+            )
+            masks = {
+                "barrel_core_mask": torch.tensor([True, True, True, False, False, False]),
+                "plug_mask": torch.tensor([False, False, False, True, True, False]),
+                "tonb_box_mask": torch.tensor([False, False, False, True, False, False]),
+                "extracellular_loop_mask": torch.tensor([False, False, False, False, True, False]),
+                "substrate_contact_mask": torch.tensor([False, False, False, False, False, True]),
+                "eval_mask": torch.tensor([False, False, False, True, True, True]),
+            }
+
+            def write_sample(name: str, split: str, plug_value: float) -> None:
+                y_delta = torch.zeros((6, 3), dtype=torch.float32)
+                y_delta[masks["plug_mask"]] = torch.tensor([plug_value, 0.0, 0.0])
+                x = torch.zeros((6, 16), dtype=torch.float32)
+                x[:, 15] = 1.0
+                torch.save(
+                    {
+                        "pos": pos,
+                        "y_delta": y_delta,
+                        "plddt": torch.full((6, 1), 85.0, dtype=torch.float32),
+                        "x": x,
+                        "metadata": {
+                            "manifest_row": {
+                                "split": split,
+                                "family": "feca",
+                                "state_label": "apo",
+                                "substrate_class": "none",
+                            }
+                        },
+                        **masks,
+                    },
+                    data_dir / f"{name}.pt",
+                )
+
+            write_sample("train_sample", "train", 1.0)
+            write_sample("val_sample", "val", 3.0)
+            write_sample("test_sample", "test", 100.0)
+
+            args = argparse.Namespace(
+                data_dir=str(data_dir),
+                split="test",
+                donor_split=["train", "val"],
+                split_source="metadata",
+                split_seed=42,
+                baseline=["global_region_mean", "region_centroid_shift", "barrel_frame_ridge"],
+                output_root=str(out_dir),
+                report_path=None,
+                region_priority="tonb_box,plug_extension_nt,plug_apical_loop,plug,barrel_core,eval,all",
+                ridge_alpha=1.0,
+                max_prediction_norm=0.0,
+                skip_eval=True,
+                include_all_region=True,
+                add_derived_regions=True,
+                plug_apical_fraction=0.5,
+                plug_extension_residues=1,
+                direction_threshold=1.0,
+                tonb_exposure_threshold=1.0,
+                bootstrap_iter=20,
+                bootstrap_seed=42,
+            )
+
+            report = build_coordinate_baselines(args)
+
+            self.assertEqual(report["target_count"], 1)
+            self.assertEqual(report["donor_count"], 2)
+            mean_pred = torch.load(
+                out_dir / "global_region_mean" / "test_sample.pt",
+                map_location="cpu",
+                weights_only=False,
+            )["pred_delta"]
+            torch.testing.assert_close(mean_pred[masks["plug_mask"]], torch.tensor([[2.0, 0.0, 0.0]] * 2))
+
+            ridge_pred = torch.load(
+                out_dir / "barrel_frame_ridge" / "test_sample.pt",
+                map_location="cpu",
+                weights_only=False,
+            )["pred_delta"]
+            self.assertEqual(tuple(ridge_pred.shape), (6, 3))
+            self.assertTrue(bool(torch.isfinite(ridge_pred).all()))
+
+    def test_external_score_baseline_classification_and_enm_scores(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            sample_path = root / "sample.pt"
+            score_dir = root / "scores"
+            out_dir = root / "curves"
+            score_dir.mkdir()
+            pos = torch.tensor(
+                [
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [2.0, 0.0, 0.0],
+                    [3.0, 0.0, 0.0],
+                    [4.0, 0.0, 0.0],
+                ],
+                dtype=torch.float32,
+            )
+            torch.save(
+                {
+                    "pos": pos,
+                    "y_delta": torch.tensor(
+                        [
+                            [0.0, 0.0, 0.0],
+                            [0.0, 0.0, 0.0],
+                            [2.0, 0.0, 0.0],
+                            [2.0, 0.0, 0.0],
+                            [0.0, 0.0, 0.0],
+                        ],
+                        dtype=torch.float32,
+                    ),
+                    "eval_mask": torch.tensor([True, True, True, True, True]),
+                    "plddt": torch.full((5, 1), 90.0, dtype=torch.float32),
+                    "x": torch.zeros((5, 144), dtype=torch.float32),
+                },
+                sample_path,
+            )
+            torch.save({"score": torch.tensor([0.0, 0.1, 0.9, 0.8, 0.2], dtype=torch.float32)}, score_dir / "sample.pt")
+
+            gnm = _gnm_mobility(pos, cutoff=2.1, mode_count=2)
+            anm = _anm_mobility(pos, cutoff=2.1, mode_count=2)
+            self.assertEqual(tuple(gnm.shape), (5,))
+            self.assertEqual(tuple(anm.shape), (5,))
+            self.assertTrue(bool(torch.isfinite(gnm).all()))
+            self.assertTrue(bool(torch.isfinite(anm).all()))
+
+            report = evaluate_classification_curves(
+                argparse.Namespace(
+                    inputs=[str(sample_path)],
+                    sample_list=None,
+                    prediction=[],
+                    score_baseline=[f"toy_score={score_dir}"],
+                    external_baseline=[],
+                    region=["eval"],
+                    positive_threshold=1.0,
+                    sasa_feature_index=129,
+                    rsa_feature_index=130,
+                    out_dir=str(out_dir),
+                    dpi=80,
+                )
+            )
+
+            toy = next(row for row in report["summary"] if row["method"] == "toy_score")
+            self.assertEqual(toy["n_positive"], 2)
+            self.assertGreater(toy["average_precision"], 0.9)
+
+    def test_external_tool_output_parsers_rank_and_extract_scores(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            foldseek_hits = root / "hits.tsv"
+            foldseek_hits.write_text(
+                "\n".join(
+                    [
+                        "query\tdonor_b\t0.70\t0.60\t0.55\t100\t1e-5",
+                        "query\tdonor_a\t0.90\t0.80\t0.75\t200\t1e-20",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            foldseek = _parse_foldseek_hits(foldseek_hits)
+
+            self.assertEqual([hit.donor_stem for hit in foldseek], ["donor_a", "donor_b"])
+            self.assertAlmostEqual(foldseek[0].metadata["foldseek_alntmscore"], 0.90)
+
+            usalign = _parse_usalign_tabular(
+                "\n".join(
+                    [
+                        "#PDBchain1\tPDBchain2\tTM1\tTM2\tRMSD\tID1\tID2\tIDali\tL1\tL2\tLali",
+                        "target.pdb:1,A\tdonor_b.pdb:1,A\t0.50\t0.40\t3.0\t0.1\t0.1\t0.1\t10\t11\t9",
+                        "target.pdb:1,A\tdonor_a.pdb:1,A\t0.80\t0.70\t2.0\t0.2\t0.2\t0.2\t10\t11\t9",
+                    ]
+                )
+            )
+
+            self.assertEqual([hit.donor_stem for hit in usalign], ["donor_a", "donor_b"])
+            self.assertAlmostEqual(usalign[0].metadata["usalign_tm_target_norm"], 0.80)
+
+            info = root / "fpocket_info.txt"
+            info.write_text(
+                "Pocket 1 :\n\tScore : \t0.123\n\tDruggability Score : \t0.456\n\n"
+                "Pocket 2 :\n\tScore : \t0.789\n",
+                encoding="utf-8",
+            )
+            fpocket = _parse_fpocket_info(info)
+
+            self.assertAlmostEqual(fpocket[1]["score"], 0.123)
+            self.assertAlmostEqual(fpocket[1]["drug_score"], 0.456)
+            self.assertAlmostEqual(fpocket[2]["score"], 0.789)
 
 
 if __name__ == "__main__":

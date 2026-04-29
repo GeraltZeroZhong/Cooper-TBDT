@@ -1,4 +1,4 @@
-"""Thin CLI aliases for reproducible HoloShift-TBDT pipeline modules.
+"""Thin CLI aliases for reproducible Cooper-TBDT pipeline modules.
 
 Each stage still owns its own arguments. This file only maps a stable stage
 name to ``python -m ...`` so commands used in docs and reports stay short.
@@ -31,6 +31,9 @@ PIPELINE_STEPS: tuple[StepSpec, ...] = (
     StepSpec("blend_predictions", "evopoint_da.pipeline.blend_tbdt_predictions"),
     StepSpec("eval_regions", "evopoint_da.pipeline.eval_tbdt_state"),
     StepSpec("template_baselines", "evopoint_da.pipeline.build_tbdt_template_baselines"),
+    StepSpec("structure_template_baselines", "evopoint_da.pipeline.build_tbdt_structure_template_baselines"),
+    StepSpec("coordinate_baselines", "evopoint_da.pipeline.build_tbdt_coordinate_baselines"),
+    StepSpec("external_baselines", "evopoint_da.pipeline.build_tbdt_external_baselines"),
     StepSpec("eval_classification", "evopoint_da.pipeline.eval_tbdt_classification_curves"),
     StepSpec("publication_report", "evopoint_da.pipeline.build_tbdt_publication_report"),
     StepSpec("docking_eval", "evopoint_da.docking_eval.pipeline_cli"),
@@ -45,7 +48,7 @@ def _run_module(module: str, extra_args: list[str], dry_run: bool) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Run a named HoloShift-TBDT pipeline module")
+    p = argparse.ArgumentParser(description="Run a named Cooper-TBDT pipeline module")
     p.add_argument(
         "--step",
         choices=[s.name for s in PIPELINE_STEPS],
