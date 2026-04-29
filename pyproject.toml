@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "evopoint-da"
 version = "0.1.0"
-description = "Protein displacement prediction and docking evaluation pipeline."
+description = "HoloShift-TBDT state-conditioned transporter displacement benchmark."
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 

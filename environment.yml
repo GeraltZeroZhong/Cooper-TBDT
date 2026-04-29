@@ -33,7 +33,6 @@ dependencies:
   - torchmetrics
   - hydra-core
   - omegaconf
-  - wandb
 
   - pip
   - pip:

@@ -1,7 +1,19 @@
 # Local data and model weights
 data/*
-!data/metadata/
-!data/metadata/pdb_uniprot_mapping.json
+!data/tbdt_state_manifest.csv
+!data/tbdt_expansion_manifest.csv
+!data/tbdt_training_manifest.csv
+!data/tbdt_mixed_manifest.csv
+!data/tbdt_gold_manifest.csv
+!data/tbdt_silver_manifest.csv
+!data/tbdt_bronze_manifest.csv
+!data/tbdt_gold_training_manifest.csv
+!data/tbdt_region_annotations/
+!data/tbdt_region_annotations/*.json
+!data/tbdt_region_annotations/auto/
+!data/tbdt_region_annotations/auto/*.json
+!data/tbdt_region_annotations/gold_auto/
+!data/tbdt_region_annotations/gold_auto/*.json
 esmc_weights/
 
 # Training and evaluation outputs
@@ -11,6 +23,11 @@ logs/
 outputs/
 artifacts/
 wandb/
+
+# Local-only internal notes and analysis markdown
+docs/
+local_handoff/
+*.log
 
 # Python/cache artifacts
 __pycache__/

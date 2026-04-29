@@ -15,22 +15,17 @@ class EvoPointDataModule(pl.LightningDataModule):
         data_dir: str = "./data/processed_graphs",
         batch_size: int = 4,
         num_workers: int = 0,
-        calib_batch_size: int = 1,
         split_seed: int = 42,
         split_ranges: dict | None = None,
-        fallback_num_features: int = 144,
         split_manifest_name: str = "split_manifest.json",
-        allow_empty_fallback: bool = False,
-        allow_length_truncation: bool = False,
-        plddt_feature_index: int = 128,
+        split_source: str = "range",
     ):
         super().__init__()
         if split_ranges is None:
             split_ranges = {
                 "train": [0.0, 0.7],
-                "val": [0.7, 0.8],
-                "calib": [0.8, 0.9],
-                "test": [0.9, 1.0],
+                "val": [0.7, 0.85],
+                "test": [0.85, 1.0],
                 "all": [0.0, 1.0],
             }
         self.save_hyperparameters()
@@ -43,9 +38,10 @@ class EvoPointDataModule(pl.LightningDataModule):
             root=self.hparams.data_dir,
             split_ranges=self.hparams.split_ranges,
             split_seed=self.hparams.split_seed,
+            split_source=self.hparams.split_source,
         )
 
-        tracked = ["train", "val", "calib", "test"]
+        tracked = ["train", "val", "test"]
         pair_sets = {k: set(os.path.basename(p) for p in self._split_files.get(k, [])) for k in tracked}
 
         overlaps = {}
@@ -59,6 +55,7 @@ class EvoPointDataModule(pl.LightningDataModule):
 
         manifest = {
             "split_seed": int(self.hparams.split_seed),
+            "split_source": str(self.hparams.split_source),
             "split_ranges": OmegaConf.to_container(self.hparams.split_ranges, resolve=True),
             "counts": {k: len(self._split_files.get(k, [])) for k in self._split_files},
             "overlap_check": "passed",
@@ -75,11 +72,7 @@ class EvoPointDataModule(pl.LightningDataModule):
             split=split,
             split_seed=self.hparams.split_seed,
             split_ranges=self.hparams.split_ranges,
-            fallback_num_features=self.hparams.fallback_num_features,
             file_list=self._split_files.get(split, []),
-            allow_empty_fallback=self.hparams.allow_empty_fallback,
-            allow_length_truncation=self.hparams.allow_length_truncation,
-            plddt_feature_index=self.hparams.plddt_feature_index,
         )
 
     def setup(self, stage: Optional[str] = None):
@@ -87,7 +80,6 @@ class EvoPointDataModule(pl.LightningDataModule):
         if stage in ("fit", None):
             self.train_set = self._make_dataset("train")
             self.val_set = self._make_dataset("val")
-            self.calib_set = self._make_dataset("calib")
         if stage in ("test", None):
             self.test_set = self._make_dataset("test")
 
@@ -96,14 +88,6 @@ class EvoPointDataModule(pl.LightningDataModule):
 
     def val_dataloader(self):
         return DataLoader(self.val_set, batch_size=self.hparams.batch_size, shuffle=False, num_workers=self.hparams.num_workers)
-
-    def calib_dataloader(self):
-        return DataLoader(
-            self.calib_set,
-            batch_size=self.hparams.calib_batch_size,
-            shuffle=False,
-            num_workers=self.hparams.num_workers,
-        )
 
     def test_dataloader(self):
         return DataLoader(self.test_set, batch_size=self.hparams.batch_size, shuffle=False, num_workers=self.hparams.num_workers)

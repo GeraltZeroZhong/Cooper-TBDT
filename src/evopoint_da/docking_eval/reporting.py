@@ -63,27 +63,6 @@ def to_markdown(report: dict[str, Any]) -> str:
             f"- mean={d['mean_delta']:.4f}, median={d['median_delta']:.4f}, std={d['std_delta']:.4f}",
         ]
 
-    if "calibration_section" in report:
-        c = report["calibration_section"]
-        lines += [
-            "",
-            "## Calibration / Uncertainty (from eval_run.py)",
-            f"- qhat: {c.get('qhat')}",
-            f"- empirical coverage: {c.get('estimated_empirical_coverage')}",
-            f"- target coverage: {c.get('target_coverage')}",
-        ]
-        cal_quality = c.get("calibration_quality", {})
-        if isinstance(cal_quality, dict):
-            lines.append(
-                f"- ECE: {cal_quality.get('ece')}, ENCE: {cal_quality.get('ence')}, |coverage gap|: {cal_quality.get('coverage_gap_abs')}"
-            )
-        tail = c.get("tail_risk", {})
-        if isinstance(tail, dict) and tail:
-            lines.append(f"- Tail risk: {tail}")
-
-    if "cross_links" in report:
-        lines += ["", "## Cross-links", f"- {report['cross_links']}"]
-
     if "traceability_meta" in report and report["traceability_meta"]:
         lines += ["", "## Traceability"]
         for k, v in report["traceability_meta"].items():

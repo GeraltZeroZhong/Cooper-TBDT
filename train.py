@@ -8,6 +8,7 @@ from pathlib import Path
 
 import hydra
 import pytorch_lightning as pl
+import torch
 from omegaconf import DictConfig
 from omegaconf.base import ContainerMetadata
 from omegaconf.dictconfig import DictConfig as OmegaDictConfig
@@ -156,6 +157,18 @@ def main(cfg: DictConfig):
 
     datamodule = hydra.utils.instantiate(cfg.data)
     model = hydra.utils.instantiate(cfg.model)
+    init_checkpoint = str(cfg.get("init_checkpoint", "") or "").strip()
+    if init_checkpoint:
+        init_checkpoint_path = init_checkpoint
+        if not os.path.isabs(init_checkpoint_path):
+            init_checkpoint_path = os.path.join(root, init_checkpoint_path)
+        checkpoint = torch.load(init_checkpoint_path, map_location="cpu", weights_only=False)
+        state_dict = checkpoint.get("state_dict", checkpoint)
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+        print(
+            "Initialized model weights from "
+            f"{init_checkpoint_path} (missing={len(missing_keys)}, unexpected={len(unexpected_keys)})"
+        )
 
     run_time = datetime.now().strftime("%Y%m%d-%H%M%S")
     study_name = str(cfg.get("study_name", "")).strip()
@@ -219,6 +232,10 @@ def main(cfg: DictConfig):
     best_disp_1to5_ckpt = callbacks[1].best_model_path
     best_disp_1to2_ckpt = callbacks[2].best_model_path
     best_selection_ckpt = callbacks[3].best_model_path
+
+    if not bool(cfg.get("run_post_train_tests", True)):
+        print("Skipping post-training Lightning tests because run_post_train_tests=false.")
+        return
 
     if best_flex_ckpt:
         print(f"Running test with best-flex checkpoint: {best_flex_ckpt}")

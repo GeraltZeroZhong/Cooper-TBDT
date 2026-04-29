@@ -80,10 +80,63 @@ def iterative_kabsch(
     return apply_transform(af2_coords, best_R, best_t)
 
 
+def _resolve_core_alignment_mask(
+    common_ids: list[str],
+    af2_idx: np.ndarray,
+    holo_idx: np.ndarray,
+    *,
+    alignment_residue_ids: list[str] | set[str] | tuple[str, ...] | None = None,
+    alignment_af2_indices: list[int] | np.ndarray | set[int] | tuple[int, ...] | None = None,
+    alignment_holo_indices: list[int] | np.ndarray | set[int] | tuple[int, ...] | None = None,
+    aligned_position_mask: list[bool] | np.ndarray | tuple[bool, ...] | None = None,
+) -> np.ndarray | None:
+    """Resolve optional core-alignment selectors onto aligned residue positions."""
+    n_aligned = len(common_ids)
+    masks: list[np.ndarray] = []
+
+    if alignment_residue_ids is not None:
+        residue_id_set = {str(rid) for rid in alignment_residue_ids}
+        masks.append(np.asarray([rid in residue_id_set for rid in common_ids], dtype=bool))
+
+    if alignment_af2_indices is not None:
+        af2_index_set = {int(idx) for idx in alignment_af2_indices}
+        masks.append(np.isin(af2_idx, list(af2_index_set)))
+
+    if alignment_holo_indices is not None:
+        holo_index_set = {int(idx) for idx in alignment_holo_indices}
+        masks.append(np.isin(holo_idx, list(holo_index_set)))
+
+    if aligned_position_mask is not None:
+        mask = np.asarray(aligned_position_mask, dtype=bool)
+        if mask.shape != (n_aligned,):
+            raise ValueError(f"aligned_position_mask must have length {n_aligned}, got shape {mask.shape}.")
+        masks.append(mask)
+
+    if not masks:
+        return None
+
+    core_mask = np.ones(n_aligned, dtype=bool)
+    for mask in masks:
+        core_mask &= mask
+    return core_mask
+
+
 def compute_displacement_target(
     af2_chains: dict[str, dict[str, Any]],
     holo_chains: dict[str, dict[str, Any]],
+    *,
+    alignment_residue_ids: list[str] | set[str] | tuple[str, ...] | None = None,
+    alignment_af2_indices: list[int] | np.ndarray | set[int] | tuple[int, ...] | None = None,
+    alignment_holo_indices: list[int] | np.ndarray | set[int] | tuple[int, ...] | None = None,
+    aligned_position_mask: list[bool] | np.ndarray | tuple[bool, ...] | None = None,
 ) -> tuple[np.ndarray, list[str], np.ndarray, np.ndarray, np.ndarray, str]:
+    """Build displacement targets from the best AF2/holo chain alignment.
+
+    Optional alignment selectors restrict the Kabsch fit to stable core residues
+    while displacement targets are still returned for every aligned residue.
+    Existing callers that pass only ``af2_chains`` and ``holo_chains`` keep the
+    previous robust full-alignment behavior.
+    """
     aligner = Align.PairwiseAligner()
     aligner.mode = "local"
     aligner.match_score = 2.0
@@ -143,10 +196,28 @@ def compute_displacement_target(
 
     af2_sub = coords_af2_full[af2_idx_np]
     holo_sub = coords_holo_full[holo_idx_np]
-    af2_aligned = iterative_kabsch(af2_sub, holo_sub, max_iter=5, trim_ratio=0.6)
-    delta_r = holo_sub - af2_aligned
 
     common_ids = [af2_chains[best_af2_id]["residue_ids"][i] for i in af2_idx_np]
+    core_mask = _resolve_core_alignment_mask(
+        common_ids,
+        af2_idx_np,
+        holo_idx_np,
+        alignment_residue_ids=alignment_residue_ids,
+        alignment_af2_indices=alignment_af2_indices,
+        alignment_holo_indices=alignment_holo_indices,
+        aligned_position_mask=aligned_position_mask,
+    )
+
+    if core_mask is None:
+        af2_aligned = iterative_kabsch(af2_sub, holo_sub, max_iter=5, trim_ratio=0.6)
+    else:
+        n_core = int(core_mask.sum())
+        if n_core < 3:
+            raise ValueError(f"Core alignment selector matched {n_core} residues; at least 3 are required.")
+        R, t = kabsch_rotation(af2_sub[core_mask], holo_sub[core_mask])
+        af2_aligned = apply_transform(af2_sub, R, t)
+
+    delta_r = holo_sub - af2_aligned
 
     return (
         delta_r.astype(np.float32),

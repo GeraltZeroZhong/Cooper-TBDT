@@ -1,0 +1,123 @@
+{
+  "schema_version": "tbdt_region_annotation_v1",
+  "protein": "FecA",
+  "uniprot_id": "P13036",
+  "organism": "Escherichia coli",
+  "default_chain": "A",
+  "residue_id_namespace": "af2_chain_uniprot_resseq",
+  "curation_status": "smoke_seed_from_af2_v6_alignment",
+  "notes": [
+    "Seed annotation for manifest wiring and smoke tests.",
+    "Residue IDs are the AF2 chain residue IDs emitted by build_tbdt_state_dataset after sequence alignment.",
+    "The FecA seed PDB files lack much of the N-terminal signal/plug region; TonB-box labels here map the visible PDB 81-86 region onto AF2 residues 114-119."
+  ],
+  "regions": {
+    "barrel_core": [
+      {
+        "chain": "A",
+        "ranges": [
+          [
+            260,
+            270
+          ],
+          [
+            300,
+            310
+          ],
+          [
+            340,
+            350
+          ],
+          [
+            380,
+            390
+          ],
+          [
+            420,
+            430
+          ],
+          [
+            470,
+            480
+          ],
+          [
+            520,
+            530
+          ],
+          [
+            565,
+            575
+          ],
+          [
+            610,
+            620
+          ],
+          [
+            650,
+            660
+          ],
+          [
+            690,
+            700
+          ],
+          [
+            720,
+            730
+          ],
+          [
+            755,
+            765
+          ]
+        ]
+      }
+    ],
+    "plug": [
+      {
+        "chain": "A",
+        "ranges": [
+          [
+            114,
+            221
+          ]
+        ]
+      }
+    ],
+    "extracellular_loop": [],
+    "tonb_box": [
+      {
+        "chain": "A",
+        "ranges": [
+          [
+            114,
+            119
+          ]
+        ]
+      }
+    ],
+    "substrate_contact": []
+  },
+  "eval_regions": [
+    "plug",
+    "extracellular_loop",
+    "tonb_box",
+    "substrate_contact"
+  ],
+  "loss_weights": {
+    "default": 1.0,
+    "barrel_core": 0.1,
+    "plug": 2.0,
+    "extracellular_loop": 2.0,
+    "tonb_box": 3.0,
+    "substrate_contact": 3.0
+  },
+  "references": [
+    {
+      "kind": "pdb",
+      "id": "1KMO"
+    },
+    {
+      "kind": "uniprot",
+      "id": "P13036"
+    }
+  ]
+}
