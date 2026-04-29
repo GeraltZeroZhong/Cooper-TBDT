@@ -214,13 +214,20 @@ def build_tbdt_state_dataset(args: argparse.Namespace) -> dict[str, Any]:
                 raise ValueError(f"barrel_core annotation has {len(core_residue_ids)} residues; at least 3 required")
             core_alignment_selector = core_residue_ids if len(core_residue_ids) >= 3 else None
 
-            delta_r, residue_ids, af2_aligned, af2_idx, holo_idx, best_af2_chain_id = compute_displacement_target(
+            (
+                delta_r,
+                residue_ids,
+                af2_aligned,
+                af2_idx,
+                holo_idx,
+                best_af2_chain_id,
+                best_holo_chain_id,
+            ) = compute_displacement_target(
                 af2_chains,
                 holo_chains,
                 alignment_residue_ids=core_alignment_selector,
             )
 
-            best_holo_chain_id = next(iter(holo_chains))
             selected_af2_data = af2_chains[best_af2_chain_id]
             out = _build_output_record(
                 row=row,

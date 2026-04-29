@@ -79,7 +79,10 @@ INFEASIBLE_REASONS = {
 DEFAULT_REGIONS = ("eval", "plug", "tonb_box", "barrel_core", "all")
 DEFAULT_BUILTIN_BASELINES = ("af2_low_plddt", "af2_surface_rsa")
 DEFAULT_PREDICTIONS = (
-    ("cooper_tbdt_scaffold_blend", Path("artifacts/tbdt_v1/predictions/region_blend_scaffold_prior_test")),
+    (
+        "cooper_tbdt_scaffold_blend",
+        Path("artifacts/tbdt_v1/report_models/predictions/validation_calibrated_region_blend_test"),
+    ),
 )
 IUPRED_URL_TEMPLATE = "https://iupred2a.elte.hu/iupred2a/{kind}/{accession}.json"
 DEFAULT_TOOL_ROOT = Path("artifacts/tbdt_v1/external_tools")
@@ -129,6 +132,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--p2rank-bin", default=None)
     parser.add_argument("--p2rank-config", default="alphafold")
     parser.add_argument("--fpocket-bin", default=None)
+    parser.add_argument(
+        "--allow-failed-zero-fallback",
+        action="store_true",
+        help="Write zero-valued per-residue scores for per-sample external-tool failures instead of failing the run.",
+    )
     parser.add_argument("--protcross-root", default=str(DEFAULT_PROTCROSS_ROOT))
     parser.add_argument("--protcross-checkpoint", default=None)
     parser.add_argument("--protcross-esm-weights", default="esmc_weights/esmc_600m_2024_12_v0.pth")
@@ -830,6 +838,8 @@ def build_baselines(args: argparse.Namespace) -> dict[str, Any]:
                 else:
                     raise ValueError(f"Unsupported feasible baseline: {baseline}")
             except Exception as exc:
+                if not bool(args.allow_failed_zero_fallback):
+                    raise RuntimeError(f"{baseline} failed for sample {sample.stem}: {exc}") from exc
                 score = torch.zeros(sample.pos.size(0), dtype=torch.float32)
                 metadata = {"method": baseline, "status": "failed_zero_fallback", "error": str(exc)}
             if score.numel() != sample.pos.size(0):
@@ -898,6 +908,10 @@ def build_baselines(args: argparse.Namespace) -> dict[str, Any]:
             "p2rank": "Uses P2Rank's AlphaFold configuration and maps AF2 residue probabilities back through the processed AF2 indices.",
             "fpocket": "Assigns each residue the maximum fpocket pocket score among contacting pocket atom files.",
             "protcross": "Runs the local ProtCross project from /home/zero/ProtCross and maps binding probabilities by AF2 residue index.",
+            "failure_policy": (
+                "Per-sample external-tool failures abort the run by default; zero-valued failure records are written "
+                "only when --allow-failed-zero-fallback is explicitly set."
+            ),
         },
     }
     report_path = Path(args.report_path) if args.report_path else output_root / "external_score_baseline_report.json"

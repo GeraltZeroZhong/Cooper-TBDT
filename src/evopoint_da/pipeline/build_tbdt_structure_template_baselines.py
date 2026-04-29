@@ -82,6 +82,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--usalign-fast", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--tool-timeout", type=float, default=600.0)
+    parser.add_argument(
+        "--allow-failed-zero-fallback",
+        action="store_true",
+        help="Write zero-displacement predictions for per-target external-tool failures instead of failing the run.",
+    )
     parser.add_argument("--skip-eval", action="store_true")
     parser.add_argument("--include-all-region", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--add-derived-regions", action=argparse.BooleanOptionalAction, default=True)
@@ -740,6 +745,8 @@ def build_baselines(args: argparse.Namespace) -> dict[str, Any]:
                     usalign_bin=usalign_bin,
                 )
             except Exception as exc:
+                if not bool(args.allow_failed_zero_fallback):
+                    raise RuntimeError(f"{baseline} failed for target {target.stem}: {exc}") from exc
                 selected = SelectedTransfer(
                     donor=None,
                     prediction=torch.zeros_like(target.y_delta),
@@ -794,6 +801,10 @@ def build_baselines(args: argparse.Namespace) -> dict[str, Any]:
                 "selected donor. Both mappings are converted through processed AF2 residue indices before vector transfer."
             ),
             "leakage_control": "Default excludes donors with the same UniProt accession as the target.",
+            "failure_policy": (
+                "Per-target external-tool failures abort the run by default; zero-displacement failure records are "
+                "written only when --allow-failed-zero-fallback is explicitly set."
+            ),
         },
     }
     report_path = Path(args.report_path) if args.report_path else output_root / "external_template_baseline_report.json"

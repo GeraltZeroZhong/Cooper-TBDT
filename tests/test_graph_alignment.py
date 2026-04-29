@@ -58,6 +58,8 @@ class GraphAndAlignmentTests(unittest.TestCase):
             self.assertEqual(parsed.shape, (3, 3))
             self.assertEqual(float(parsed[0, 1]), 2.0)
             self.assertEqual(float(parsed[2, 2]), 0.0)
+            with self.assertRaises(ValueError):
+                parse_pae_matrix(str(path), 3, strict=True)
 
             bad = Path(tmpdir) / "bad.json"
             bad.write_text(json.dumps({"not_pae": []}), encoding="utf-8")

@@ -156,8 +156,7 @@ def _fit_scale(
     }
 
 
-def main() -> None:
-    args = parse_args()
+def blend_predictions(args: argparse.Namespace) -> dict[str, Any]:
     region_sources = {key: Path(value) for key, value in _parse_mapping(args.region_source).items()}
     explicit_region_scales = _parse_mapping(args.region_scale, value_type=float)
     calibration_region_sources = {
@@ -246,6 +245,13 @@ def main() -> None:
         "base_scale": float(args.base_scale),
         "region_sources": {region: str(path) for region, path in region_sources.items()},
         "region_scale_reports": region_scale_reports,
+        "auto_scale_regions": sorted(auto_scale_regions),
+        "calibration_split": args.calibration_split,
+        "calibration_region_sources": {
+            region: str(path) for region, path in calibration_region_sources.items()
+        },
+        "min_calibration_residues": int(args.min_calibration_residues),
+        "max_scale": float(args.max_scale),
         "priority": priority,
         "output_dir": str(output_dir),
         "n_predictions": len(output_files),
@@ -255,7 +261,18 @@ def main() -> None:
     report_path.parent.mkdir(parents=True, exist_ok=True)
     with open(report_path, "w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2)
-    print(json.dumps({"report_path": str(report_path), "n_predictions": len(output_files)}, indent=2))
+    return report
+
+
+def main_with_args(args: argparse.Namespace) -> dict[str, Any]:
+    report = blend_predictions(args)
+    report_path = Path(args.report_path) if args.report_path else Path(args.output_dir).with_name(f"{Path(args.output_dir).name}_report.json")
+    print(json.dumps({"report_path": str(report_path), "n_predictions": len(report["output_files"])}, indent=2))
+    return report
+
+
+def main() -> None:
+    main_with_args(parse_args())
 
 
 if __name__ == "__main__":

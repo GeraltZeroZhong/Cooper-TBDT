@@ -4,6 +4,7 @@ import argparse
 import glob
 import json
 import os
+import re
 from collections import Counter
 
 import numpy as np
@@ -49,6 +50,7 @@ TBDT_NODE_KEYS = {
     "eval_mask",
     "loss_weight",
 }
+AFDB_MODEL_RE = re.compile(r"^AF-(?P<uniprot>.+?)-F\d+-model_v\d+$")
 
 
 def get_args() -> argparse.Namespace:
@@ -85,7 +87,11 @@ def build_uniprot_to_af2_path(af2_dir: str) -> dict[str, str]:
     uniprot_to_path = {}
     for af2_path in glob.glob(os.path.join(af2_dir, "*.pdb")):
         stem = os.path.splitext(os.path.basename(af2_path))[0]
-        uniprot_id = stem[3:] if stem.startswith("AF-") else stem
+        match = AFDB_MODEL_RE.match(stem)
+        if match:
+            uniprot_id = match.group("uniprot")
+        else:
+            uniprot_id = stem[3:] if stem.startswith("AF-") else stem
         uniprot_to_path[uniprot_id] = af2_path
     return uniprot_to_path
 
@@ -94,12 +100,17 @@ def _resolve_pae_path(pae_dir: str, uniprot_id: str | None, pair_stem: str) -> s
     """Prefer AF-<UNIPROT> naming, then pair_id naming."""
     candidates: list[str] = []
     if uniprot_id:
-        candidates.extend([
-            os.path.join(pae_dir, f"AF-{uniprot_id}.npy"),
-            os.path.join(pae_dir, f"AF-{uniprot_id}.json"),
-            os.path.join(pae_dir, f"{uniprot_id}.npy"),
-            os.path.join(pae_dir, f"{uniprot_id}.json"),
-        ])
+        uniprot_variants = []
+        for value in (uniprot_id, uniprot_id.upper()):
+            if value and value not in uniprot_variants:
+                uniprot_variants.append(value)
+        for value in uniprot_variants:
+            candidates.extend([
+                os.path.join(pae_dir, f"AF-{value}.npy"),
+                os.path.join(pae_dir, f"AF-{value}.json"),
+                os.path.join(pae_dir, f"{value}.npy"),
+                os.path.join(pae_dir, f"{value}.json"),
+            ])
 
     candidates.extend([
         os.path.join(pae_dir, f"{pair_stem}.npy"),
@@ -116,20 +127,51 @@ def _metadata_af2_path(sample: dict) -> str | None:
     metadata = sample.get("metadata", {})
     if not isinstance(metadata, dict):
         return None
-    raw_path = metadata.get("af2_pdb")
-    if not raw_path:
-        return None
-    path = str(raw_path)
-    return path if os.path.isabs(path) else os.path.abspath(path)
+    manifest_row = metadata.get("manifest_row", {})
+    raw_paths = [metadata.get("af2_pdb")]
+    if isinstance(manifest_row, dict):
+        raw_paths.append(manifest_row.get("af2_pdb"))
+    for raw_path in raw_paths:
+        if not raw_path:
+            continue
+        path = str(raw_path)
+        if os.path.isabs(path):
+            candidates = [path]
+        else:
+            candidates = [
+                os.path.abspath(path),
+                os.path.abspath(os.path.join("data", path)),
+            ]
+        for resolved in candidates:
+            if os.path.exists(resolved):
+                return resolved
+    return None
 
 
 def _metadata_uniprot_id(sample: dict) -> str | None:
+    value = sample.get("uniprot_id")
+    if value:
+        return str(value).strip()
     metadata = sample.get("metadata", {})
     if isinstance(metadata, dict):
         value = metadata.get("uniprot_id")
         if value:
-            return str(value)
+            return str(value).strip()
+        manifest_row = metadata.get("manifest_row", {})
+        if isinstance(manifest_row, dict):
+            value = manifest_row.get("uniprot_id")
+            if value:
+                return str(value).strip()
     return None
+
+
+def _invalidate_dataset_cache(output_dir: str) -> int:
+    processed_dir = os.path.join(output_dir, "processed")
+    removed = 0
+    for cache_path in glob.glob(os.path.join(processed_dir, "graph_cache_*.pt")):
+        os.remove(cache_path)
+        removed += 1
+    return removed
 
 
 def _copy_optional_fields(sample: dict, n_nodes: int) -> dict:
@@ -228,6 +270,7 @@ def main() -> None:
             d["residue_ids"],
             neighbor_radius=args.contact_radius,
             surface_sasa_threshold=args.surface_sasa_threshold,
+            require_residue_match=True,
         )
 
         plddt_raw = d["plddt"].float()
@@ -273,10 +316,19 @@ def main() -> None:
                     "--allow-missing-pae to explicitly use zero PAE edge features."
                 )
             skip_reasons["missing_pae_zero_edge_feature"] += 1
+        strict_pae = not bool(args.allow_missing_pae)
         if "af2_indices" in d:
-            pae = parse_pae_matrix_for_indices(pae_path, [int(i) for i in d["af2_indices"].tolist()])
+            pae = parse_pae_matrix_for_indices(
+                pae_path,
+                [int(i) for i in d["af2_indices"].tolist()],
+                strict=strict_pae,
+            )
         else:
-            pae = parse_pae_matrix_for_residue_ids(pae_path, list(d["residue_ids"]))
+            pae = parse_pae_matrix_for_residue_ids(
+                pae_path,
+                list(d["residue_ids"]),
+                strict=strict_pae,
+            )
         edge_index, edge_attr = build_knn_edges(d["af2_pos"].float(), k=args.k, pae=pae)
         node_v, edge_s, edge_v = build_gvp_graph_features(d["af2_pos"].float(), edge_index, edge_attr)
 
@@ -302,11 +354,13 @@ def main() -> None:
         y_norm_means.append(float(torch.norm(d["y_delta"].float(), dim=-1).mean().item()))
         plddt_means.append(float(plddt.mean().item()))
 
+    invalidated_dataset_caches = _invalidate_dataset_cache(args.output_dir) if processed_count else 0
     report = {
         "input_pairs": len(files),
         "processed_graphs": processed_count,
         "skipped_pairs": int(len(files) - processed_count),
         "skip_reason_counts": dict(skip_reasons),
+        "invalidated_dataset_caches": invalidated_dataset_caches,
         "smoke_test_features": bool(args.smoke_test_features),
         "feature_dim_unique": sorted(set(feature_dims)),
         "node_count_stats": {
@@ -327,6 +381,7 @@ def main() -> None:
             "mean": float(np.mean(plddt_means)) if plddt_means else None,
             "median": float(np.median(plddt_means)) if plddt_means else None,
         },
+        "strict_residue_matching": True,
     }
     report_dir = os.path.dirname(args.report_path)
     if report_dir:

@@ -72,6 +72,8 @@ def parse_pae_matrix(pae_path: str | None, n: int, *, strict: bool = False) -> n
 
     h, w = int(pae.shape[0]), int(pae.shape[1])
     if h != n or w != n:
+        if strict:
+            raise ValueError(f"PAE matrix shape {pae.shape} does not match requested shape {(n, n)}.")
         out = _zeros()
         hh, ww = min(n, h), min(n, w)
         out[:hh, :ww] = pae[:hh, :ww]
