@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.data import Data
 
@@ -56,6 +57,46 @@ class ModelHelperTests(unittest.TestCase):
         scaled.eval()
 
         torch.testing.assert_close(scaled.forward(batch), base.forward(batch) * 3.0)
+
+    def test_forward_can_mask_node_and_edge_scalar_features(self) -> None:
+        class CaptureBackbone(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.x = None
+                self.edge_s = None
+
+            def forward(self, x, node_v, edge_index, edge_s, edge_v):
+                self.x = x.detach().clone()
+                self.edge_s = edge_s.detach().clone()
+                return torch.zeros((x.size(0), 3), dtype=x.dtype, device=x.device)
+
+        batch = Data(
+            x=torch.arange(12, dtype=torch.float32).reshape(3, 4),
+            pos=torch.zeros((3, 3), dtype=torch.float32),
+            edge_index=torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+            node_v=torch.zeros((3, 3, 3), dtype=torch.float32),
+            edge_s=torch.arange(10, dtype=torch.float32).reshape(2, 5),
+            edge_v=torch.zeros((2, 1, 3), dtype=torch.float32),
+        )
+        module = EvoPointLitModule(
+            in_channels=4,
+            edge_scalar_dim=5,
+            hidden_dim=8,
+            num_layers=1,
+            zero_node_scalar_feature_indices=[1, 3],
+            zero_edge_scalar_feature_indices=[0, 4],
+        )
+        capture = CaptureBackbone()
+        module.backbone = capture
+
+        module.forward(batch)
+
+        expected_x = batch.x.clone()
+        expected_x[:, [1, 3]] = 0.0
+        expected_edge_s = batch.edge_s.clone()
+        expected_edge_s[:, [0, 4]] = 0.0
+        torch.testing.assert_close(capture.x, expected_x)
+        torch.testing.assert_close(capture.edge_s, expected_edge_s)
 
     def test_gvp_forward_predicts_node_displacements(self) -> None:
         pos = torch.tensor(
