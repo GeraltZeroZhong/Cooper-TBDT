@@ -77,6 +77,8 @@ class EvoPointLitModule(pl.LightningModule):
         default_total_epochs: int = 100,
         min_scheduler_epochs: int = 1,
         lr_start_factor: float = 1e-8,
+        zero_node_scalar_feature_indices: list[int] | None = None,
+        zero_edge_scalar_feature_indices: list[int] | None = None,
     ):
         super().__init__()
         if disp_group_edges is None:
@@ -145,6 +147,22 @@ class EvoPointLitModule(pl.LightningModule):
         self.coord_scale = coord_scale
         self._test_disp_agg = {}
 
+    @staticmethod
+    def _zero_scalar_features(features: torch.Tensor, indices, feature_name: str) -> torch.Tensor:
+        if indices is None:
+            return features
+        index_list = [int(index) for index in indices]
+        if not index_list:
+            return features
+        if min(index_list) < 0 or max(index_list) >= int(features.size(-1)):
+            raise ValueError(
+                f"{feature_name} mask indices {index_list} are outside feature dimension {features.size(-1)}."
+            )
+        masked = features.clone()
+        index_tensor = torch.tensor(index_list, dtype=torch.long, device=features.device)
+        masked.index_fill_(dim=-1, index=index_tensor, value=0.0)
+        return masked
+
     def on_test_epoch_start(self):
         self._test_disp_agg = {}
 
@@ -207,7 +225,11 @@ class EvoPointLitModule(pl.LightningModule):
         return embedding(ids.clamp(min=0, max=embedding.num_embeddings - 1))
 
     def _backbone_input_x(self, batch) -> torch.Tensor:
-        x = batch.x
+        x = self._zero_scalar_features(
+            batch.x,
+            self.hparams.zero_node_scalar_feature_indices,
+            "node scalar",
+        )
         if not self.use_tbdt_conditioning:
             return x
 
@@ -327,6 +349,11 @@ class EvoPointLitModule(pl.LightningModule):
                 f"node_v={tuple(node_v.shape)}, edge_s={tuple(edge_s.shape)}, "
                 f"edge_v={tuple(edge_v.shape)}, nodes={x.size(0)}, edges={batch.edge_index.size(1)}"
             )
+        edge_s = self._zero_scalar_features(
+            edge_s,
+            self.hparams.zero_edge_scalar_feature_indices,
+            "edge scalar",
+        )
         return self.backbone(x, node_v, batch.edge_index, edge_s, edge_v) * self.hparams.output_scale
 
     def predict_displacement(self, batch):

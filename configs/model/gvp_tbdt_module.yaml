@@ -6,6 +6,10 @@ in_channels: 176
 base_in_channels: 144
 use_tbdt_conditioning: true
 condition_embedding_dim: 8
+region_embedding_dim: null
+family_embedding_dim: null
+state_embedding_dim: null
+substrate_embedding_dim: null
 region_vocab_size: 64
 family_vocab_size: 1024
 state_vocab_size: 128
@@ -35,6 +39,8 @@ eps: 1e-8
 default_total_epochs: 100
 min_scheduler_epochs: 1
 lr_start_factor: 1e-8
+zero_node_scalar_feature_indices: []
+zero_edge_scalar_feature_indices: []
 disp_group_edges: [0.0, 1.0, 5.0]
 plddt_bin_edges: [0.0, 60.0, 70.0, 80.0, 90.0, 100.0]
 test_disp_bin_edges: [0.0, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0]
