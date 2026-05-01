@@ -40,6 +40,17 @@ PIPELINE_STEPS: tuple[StepSpec, ...] = (
     StepSpec("publication_report", "evopoint_da.pipeline.build_tbdt_publication_report"),
     StepSpec("prepare_docking_manifest", "evopoint_da.pipeline.prepare_tbdt_docking_manifest"),
     StepSpec("docking_eval", "evopoint_da.docking_eval.pipeline_cli"),
+    StepSpec("figure_main_results", "evopoint_da.figures.main_results"),
+    StepSpec("figure_gold_test_displacement", "evopoint_da.figures.gold_test_displacement_landscape"),
+    StepSpec("figure_corpus_workflow", "evopoint_da.figures.corpus_workflow"),
+    StepSpec("figure_task_definition", "evopoint_da.figures.task_definition"),
+    StepSpec("figure_baseline_comparison", "evopoint_da.figures.baseline_comparison"),
+    StepSpec("figure_critical_ablation", "evopoint_da.figures.critical_ablation"),
+    StepSpec("figure_tonb_boundary", "evopoint_da.figures.tonb_mechanistic_boundary"),
+    StepSpec("figure_residue_shift_localization", "evopoint_da.figures.residue_shift_localization"),
+    StepSpec("figure_seed_stability_selector", "evopoint_da.figures.seed_stability_selector"),
+    StepSpec("figure_all", "evopoint_da.figures.build_all"),
+    StepSpec("figure_panel_archive", "evopoint_da.figures.panel_archive"),
 )
 
 
