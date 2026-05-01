@@ -82,6 +82,31 @@ with:
 python -m pip install -e ".[dev,docking]"
 ```
 
+### ESM-C Weights
+
+The Conda environment installs the `esm` Python package, but Cooper-TBDT expects
+the ESM-C checkpoint itself as a local file when building publication-style graph
+features. Place the 600M ESM-C weights at the default path or pass your own path
+with `--esm-weights`:
+
+```text
+esmc_weights/esmc_600m_2024_12_v0.pth
+```
+
+Use the same PCA file with the matching ESM-C features:
+
+```bash
+python main.py --step build_features -- \
+  --pair_dir data/processed_tbdt_gold_pairs \
+  --output_dir data/processed_tbdt_gold_graphs \
+  --esm_weights esmc_weights/esmc_600m_2024_12_v0.pth \
+  --pca_path data/pca_esmc_128.pkl \
+  --fit_pca
+```
+
+For software checks without ESM-C weights, use `--smoke-test-features`; do not
+use smoke-test features for publication metrics.
+
 ## Three Workflows
 
 `main.py` exposes both low-level pipeline stages and three higher-level
