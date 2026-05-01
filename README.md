@@ -93,6 +93,23 @@ with `--esm-weights`:
 esmc_weights/esmc_600m_2024_12_v0.pth
 ```
 
+One lightweight way to fetch the weights is the Hugging Face CLI:
+
+```bash
+python -m pip install -U "huggingface_hub[cli]"
+mkdir -p esmc_weights
+huggingface-cli download EvolutionaryScale/esmc-600m-2024-12 \
+  data/weights/esmc_600m_2024_12_v0.pth \
+  --local-dir esmc_weights/esmc-600m-2024-12
+cp esmc_weights/esmc-600m-2024-12/data/weights/esmc_600m_2024_12_v0.pth \
+  esmc_weights/esmc_600m_2024_12_v0.pth
+```
+
+You can also use Git LFS to clone
+`https://huggingface.co/EvolutionaryScale/esmc-600m-2024-12` and then copy
+`data/weights/esmc_600m_2024_12_v0.pth` to the path above. Review the upstream
+model license before downloading or redistributing ESM-C assets.
+
 Use the same PCA file with the matching ESM-C features:
 
 ```bash
@@ -230,13 +247,13 @@ This workflow runs the Gold supervised path end to end:
 
 1. download Gold structures and AFDB/PAE assets;
 2. build AFDB-to-experimental displacement pair files;
-3. build PyG graph files with structure, PAE, SASA, and ESMC/PCA features;
+3. build PyG graph files with structure, PAE, SASA, and ESM-C/PCA features;
 4. train the scaffold-prior GVP model;
 5. export held-out predictions from the selected checkpoint;
 6. evaluate raw AFDB and model predictions with region-level metrics.
 
 Publication-style reproduction requires real AFDB-v6 structures, PAE files, and
-ESMC weights:
+ESM-C weights:
 
 ```bash
 python main.py --workflow reproduce_training -- \
@@ -344,7 +361,7 @@ Tracked data files define the benchmark:
 - `data/tbdt_region_annotations/`: JSON masks for barrel core, plug, TonB box, and related regions.
 
 Publication graph builds should use real AFDB-v6 structures, PAE files, and
-ESMC/PCA features. `--smoke-test-features` and `--allow-missing-pae` are for
+ESM-C/PCA features. `--smoke-test-features` and `--allow-missing-pae` are for
 debugging only.
 
 ## Evaluation Notes
