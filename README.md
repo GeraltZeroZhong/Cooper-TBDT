@@ -318,20 +318,6 @@ Tracked data files define the benchmark:
 - `data/tbdt_bronze_manifest.csv`: AFDB-only TBDT homolog records.
 - `data/tbdt_region_annotations/`: JSON masks for barrel core, plug, TonB box, and related regions.
 
-Large local assets are intentionally ignored by Git:
-
-```text
-data/raw_af2/
-data/raw_pdb/
-data/processed_tbdt_*_pairs/
-data/processed_tbdt_*_graphs/
-checkpoints/
-logs/
-val_metrics/
-outputs/
-artifacts/
-```
-
 Publication graph builds should use real AFDB-v6 structures, PAE files, and
 ESMC/PCA features. `--smoke-test-features` and `--allow-missing-pae` are for
 debugging only.
@@ -412,6 +398,15 @@ Reproducibility conventions:
 - Treat missing PAE and smoke-test features as non-publication settings.
 - Report region-resolved metrics as the main endpoint; all-residue summaries are diagnostic.
 - Interpret TonB-box results together with direction and exposure-state diagnostics.
+
+## Release Notes
+
+### v0.1.0 Initial Release
+
+Initial Cooper-TBDT release with versioned benchmark manifests, benchmark asset
+download workflow, provided-checkpoint baseline prediction, Gold training
+reproduction workflow, region-resolved evaluation utilities, and publication
+figure/report builders.
 
 ## License
 
