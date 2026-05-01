@@ -13,71 +13,47 @@ regions should move for a target state.
 
 ## Quick Start
 
-Create the development environment and install the package:
+### Download Benchmark Assets Only
+
+If you only want the Cooper-TBDT benchmark assets, you do not need the full
+PyTorch/PyG training environment. A minimal Python environment with `requests`
+is enough:
 
 ```bash
-conda env create -f environment.yml
-conda activate evopoint_da
-python -m pip install -e ".[dev]"
+python -m venv .venv-download
+source .venv-download/bin/activate
+python -m pip install requests
+
+PYTHONPATH=src python main.py --workflow download_benchmark
 ```
 
-Inspect available pipeline stages:
+This reads `data/tbdt_mixed_manifest.csv`, downloads experimental structures to
+`data/raw_pdb/`, downloads AFDB-v6 structures and PAE files to `data/raw_af2/`,
+syncs the Gold/Silver/Bronze manifests, and writes a download report under
+`artifacts/tbdt_v1/`.
+
+To download only the supervised Gold subset:
 
 ```bash
-python main.py --step publication_report -- --help
-python main.py --step build_pairs -- --help
-python main.py --step build_features -- --help
-python main.py --step eval_regions -- --help
+PYTHONPATH=src python main.py --workflow download_benchmark -- --tier gold
 ```
 
-A minimal Gold workflow is:
+### Run The Provided Baseline Checkpoint
+
+Baseline prediction requires the full Cooper-TBDT environment because it loads
+processed graph files with PyTorch/PyG and runs the GVP model. After installing
+the environment below, run:
 
 ```bash
-python main.py --step download_assets -- \
-  --manifest data/tbdt_mixed_manifest.csv \
-  --tier gold \
-  --download-pae \
-  --sync-tier-manifests
-
-python main.py --step build_pairs -- \
-  --manifest data/tbdt_gold_training_manifest.csv \
-  --out_dir data/processed_tbdt_gold_pairs \
-  --require-core-alignment
-
-python main.py --step build_features -- \
-  --pair_dir data/processed_tbdt_gold_pairs \
-  --output_dir data/processed_tbdt_gold_graphs \
-  --esm_weights esmc_weights/esmc_600m_2024_12_v0.pth \
-  --pca_path data/pca_esmc_128.pkl \
-  --fit_pca
-
-python train.py \
-  data=tbdt_state \
-  model=gvp_tbdt_module \
-  data.data_dir=data/processed_tbdt_gold_graphs \
-  study_name=tbdt_gold_scaffold_prior \
-  trainer.max_epochs=40
+python main.py --workflow baseline_predict -- \
+  --data-dir data/processed_tbdt_gold_graphs \
+  --output-dir artifacts/tbdt_v1/predictions/scaffold_prior_test
 ```
 
-## Scientific Scope
-
-Cooper-TBDT is not a de novo structure-prediction benchmark and does not use
-full-chain RMSD as its main success criterion. The raw AFDB structure is the
-zero-displacement baseline. A method improves the task only when its predicted
-local displacement field lowers region-level error relative to leaving the AFDB
-coordinates unchanged.
-
-For each matched residue `i`, the target is:
-
-```text
-delta_i = x_i(exp) - x_i(AFDB)
-x_i(corrected) = x_i(AFDB) + delta_hat_i
-```
-
-where the AFDB and experimental structures have already been placed in a shared
-barrel-core frame. The main reporting units are functional regions: barrel core,
-plug, extracellular loops, substrate-contact residues, TonB box, and their
-evaluation masks.
+The prediction workflow expects processed graph files in
+`data/processed_tbdt_gold_graphs`. If you only have the raw downloaded assets,
+use Workflow 3 or the `build_pairs` and `build_features` stages to construct
+those graphs first.
 
 ## Installation
 
@@ -106,9 +82,206 @@ with:
 python -m pip install -e ".[dev,docking]"
 ```
 
+## Three Workflows
+
+`main.py` exposes both low-level pipeline stages and three higher-level
+workflows:
+
+```bash
+python main.py --workflow download_benchmark -- --help
+python main.py --workflow baseline_predict -- --help
+python main.py --workflow reproduce_training -- --help
+```
+
+Use `--dry-run` before `--workflow` to print the exact commands without running
+them:
+
+```bash
+python main.py --dry-run --workflow reproduce_training
+```
+
+### 1. Download The Cooper-TBDT Benchmark Dataset
+
+This workflow downloads the structures and AFDB/PAE assets referenced by the
+versioned manifests. By default it downloads Gold, Silver, and Bronze records,
+writes into `data/raw_pdb/` and `data/raw_af2/`, and synchronizes the tier
+manifests.
+
+```bash
+python main.py --workflow download_benchmark
+```
+
+To download only the supervised Gold benchmark assets:
+
+```bash
+python main.py --workflow download_benchmark -- --tier gold
+```
+
+Main outputs:
+
+- `data/raw_pdb/`: experimental RCSB structures
+- `data/raw_af2/`: AFDB structures and PAE files
+- `data/tbdt_gold_manifest.csv`, `data/tbdt_silver_manifest.csv`,
+  `data/tbdt_bronze_manifest.csv`: synchronized tier manifests
+- `artifacts/tbdt_v1/download_tbdt_manifest_assets_report.json`: download report
+
+Useful options:
+
+```bash
+python main.py --workflow download_benchmark -- \
+  --tier gold \
+  --workers 16 \
+  --raw-pdb-dir data/raw_pdb \
+  --raw-af2-dir data/raw_af2
+```
+
+### 2. Run Baseline Prediction From The Provided Checkpoint
+
+Use this workflow when the benchmark graphs already exist and you want baseline
+predictions from the Cooper-TBDT checkpoint we provide. It does not train or
+evaluate; it downloads the published checkpoint if needed and exports `*.pt`
+prediction files.
+
+```bash
+python main.py --workflow baseline_predict -- \
+  --data-dir data/processed_tbdt_gold_graphs \
+  --split test \
+  --split-source metadata \
+  --output-dir artifacts/tbdt_v1/predictions/scaffold_prior_test
+```
+
+The default checkpoint is the seed-404 `best-selection` scaffold-prior baseline.
+The workflow stores it at:
+
+```text
+checkpoints/cooper_tbdt_baseline/best-selection-seed404.ckpt
+```
+
+If the file is missing, the workflow downloads:
+
+```text
+https://github.com/GeraltZeroZhong/Cooper-TBDT/releases/download/v0.1.0/cooper_tbdt_baseline_seed404_best-selection.ckpt
+```
+
+The expected SHA256 is:
+
+```text
+cf7515a8c1634b7a365696d807d03a37ea6fdd483260b4e8b52aa7c7c6daf891
+```
+
+Main output:
+
+- `artifacts/tbdt_v1/predictions/scaffold_prior_test/*.pt`
+- `artifacts/tbdt_v1/predictions/scaffold_prior_test_report.json`
+
+If the interpretation is binding-site or pocket-oriented, also consider adding
+[ProtCross](https://github.com/GeraltZeroZhong/ProtCross) as an external
+baseline. Cooper-TBDT predicts residue-level C-alpha displacement vectors,
+whereas ProtCross predicts residue-level binding-site probabilities on PDB/AF2
+structures. It is therefore a score-only binding-site comparator, not a
+replacement for the Cooper-TBDT coordinate endpoint.
+
+```bash
+python main.py --step external_baselines -- \
+  --data-dir data/processed_tbdt_gold_graphs \
+  --split test \
+  --split-source metadata \
+  --baseline protcross_pocket_score \
+  --output-root artifacts/tbdt_v1/external_score_baselines \
+  --classification-out-dir artifacts/tbdt_v1/external_baseline_curves
+```
+
+To use a locally supplied copy or a mirror instead of the default release asset:
+
+```bash
+python main.py --workflow baseline_predict -- \
+  --ckpt checkpoints/cooper_tbdt_baseline/best-selection-seed404.ckpt \
+  --checkpoint-url "$COOPER_TBDT_BASELINE_CHECKPOINT_URL"
+```
+
+### 3. Reproduce Cooper-TBDT Training And Results
+
+This workflow runs the Gold supervised path end to end:
+
+1. download Gold structures and AFDB/PAE assets;
+2. build AFDB-to-experimental displacement pair files;
+3. build PyG graph files with structure, PAE, SASA, and ESMC/PCA features;
+4. train the scaffold-prior GVP model;
+5. export held-out predictions from the selected checkpoint;
+6. evaluate raw AFDB and model predictions with region-level metrics.
+
+Publication-style reproduction requires real AFDB-v6 structures, PAE files, and
+ESMC weights:
+
+```bash
+python main.py --workflow reproduce_training -- \
+  --esm-weights esmc_weights/esmc_600m_2024_12_v0.pth \
+  --pca-path data/pca_esmc_128.pkl \
+  --max-epochs 40
+```
+
+Main outputs:
+
+- `data/processed_tbdt_gold_pairs/*.pt`
+- `data/processed_tbdt_gold_graphs/*.pt`
+- `checkpoints/tbdt_gold_scaffold_prior/<timestamp>/*.ckpt`
+- `val_metrics/tbdt_gold_scaffold_prior/<timestamp>/*.csv`
+- `artifacts/tbdt_v1/predictions/scaffold_prior_test/*.pt`
+- `artifacts/tbdt_v1/gold_test_zero_region_metrics.{json,csv}`
+- `artifacts/tbdt_v1/gold_test_scaffold_prior_region_metrics.{json,csv}`
+- `artifacts/tbdt_v1/gold_test_scaffold_prior_paired_delta.csv`
+- `artifacts/tbdt_v1/gold_test_scaffold_prior_tonb_metrics.csv`
+
+For a CPU smoke test, use deterministic lightweight features and a small model.
+This is only a software check and is not suitable for publication reporting:
+
+```bash
+python main.py --workflow reproduce_training -- \
+  --smoke-test-features \
+  --allow-missing-pae \
+  --accelerator cpu \
+  --devices 1 \
+  --max-epochs 1 \
+  --skip-post-train-tests \
+  --train-override model.hidden_dim=16 \
+  --train-override model.num_layers=1
+```
+
+To reuse already built data or an already trained checkpoint:
+
+```bash
+python main.py --workflow reproduce_training -- \
+  --skip-download \
+  --skip-build-pairs \
+  --skip-build-features \
+  --skip-train \
+  --ckpt checkpoints/tbdt_gold_scaffold_prior/<run>/best-selection-*.ckpt
+```
+
+## Scientific Scope
+
+Cooper-TBDT is not a de novo structure-prediction benchmark and does not use
+full-chain RMSD as its main success criterion. The raw AFDB structure is the
+zero-displacement baseline. A method improves the task only when its predicted
+local displacement field lowers region-level error relative to leaving the AFDB
+coordinates unchanged.
+
+For each matched residue `i`, the target is:
+
+```text
+delta_i = x_i(exp) - x_i(AFDB)
+x_i(corrected) = x_i(AFDB) + delta_hat_i
+```
+
+where the AFDB and experimental structures have already been placed in a shared
+barrel-core frame. The main reporting units are functional regions: barrel core,
+plug, extracellular loops, substrate-contact residues, TonB box, and their
+evaluation masks.
+
 ## Command Line
 
-`main.py` provides stable aliases for reproducible pipeline stages:
+The workflow interface is intended for common use. The original single-stage
+interface is still available for debugging and publication artifact assembly:
 
 ```bash
 python main.py --step <stage> -- <stage-specific arguments>
@@ -163,97 +336,13 @@ Publication graph builds should use real AFDB-v6 structures, PAE files, and
 ESMC/PCA features. `--smoke-test-features` and `--allow-missing-pae` are for
 debugging only.
 
-## Training
-
-The training entry point is `train.py`, configured through Hydra:
-
-```bash
-python train.py \
-  data=tbdt_state \
-  model=gvp_tbdt_module \
-  data.data_dir=data/processed_tbdt_gold_graphs \
-  study_name=tbdt_gold_scaffold_prior \
-  trainer.max_epochs=40
-```
-
-The default model is a scaffold-prior GVP network. It uses residue graph
-geometry, ESMC/PCA sequence features, AFDB confidence features, PAE-aware edges,
-region/family/state/substrate conditioning, region-weighted displacement loss,
-and a high-confidence barrel-core anchor.
-
-CPU smoke test:
-
-```bash
-python train.py \
-  data=tbdt_state \
-  model=gvp_tbdt_module \
-  data.data_dir=data/processed_tbdt_gold_graphs_smoke \
-  trainer.accelerator=cpu \
-  trainer.devices=1 \
-  trainer.max_epochs=1 \
-  model.hidden_dim=16 \
-  model.num_layers=1 \
-  +run_post_train_tests=false
-```
-
-Training writes checkpoints, logger output, and validation metrics under:
-
-```text
-checkpoints/<study_name>/<timestamp>/
-logs/
-val_metrics/<study_name>/<timestamp>/
-```
-
-## Prediction And Evaluation
-
-Export predictions:
-
-```bash
-python main.py --step predict_graphs -- \
-  --ckpt checkpoints/tbdt_gold_scaffold_prior/<timestamp>/best-selection-*.ckpt \
-  --data-dir data/processed_tbdt_gold_graphs \
-  --split test \
-  --split-source metadata \
-  --output-dir artifacts/tbdt_v1/predictions/scaffold_prior_test
-```
-
-Evaluate raw AFDB as the zero-displacement baseline:
-
-```bash
-python main.py --step eval_regions -- \
-  data/processed_tbdt_gold_graphs \
-  --output-json artifacts/tbdt_v1/gold_test_zero_region_metrics.json \
-  --output-csv artifacts/tbdt_v1/gold_test_zero_region_metrics.csv
-```
-
-Evaluate model predictions:
-
-```bash
-python main.py --step eval_regions -- \
-  data/processed_tbdt_gold_graphs \
-  --predictions artifacts/tbdt_v1/predictions/scaffold_prior_test \
-  --output-json artifacts/tbdt_v1/gold_test_scaffold_prior_region_metrics.json \
-  --output-csv artifacts/tbdt_v1/gold_test_scaffold_prior_region_metrics.csv \
-  --paired-delta-csv artifacts/tbdt_v1/gold_test_scaffold_prior_paired_delta.csv \
-  --tonb-metrics-csv artifacts/tbdt_v1/gold_test_scaffold_prior_tonb_metrics.csv
-```
+## Evaluation Notes
 
 Core evaluation fields include `target_displacement_rms`,
 `prediction_error_rms`, `mse_improvement_vs_zero_fraction`,
 `sample_improvement_rate`, `direction_cosine_mean`, and `magnitude_mae`. TonB
 results should be interpreted with centroid, direction, and exposure-state
 diagnostics, not coordinate RMSD alone.
-
-## Outputs
-
-Main generated outputs are:
-
-- Pair files: `data/processed_tbdt_*_pairs/*.pt`
-- Graph files: `data/processed_tbdt_*_graphs/*.pt`
-- Checkpoints: `checkpoints/<study_name>/<timestamp>/*.ckpt`
-- Validation metrics: `val_metrics/<study_name>/<timestamp>/*.csv`
-- Region metrics: `artifacts/tbdt_v1/**/*.json` and `*.csv`
-- Figure panels and publication tables: `artifacts/tbdt_v1/`
 
 The publication report collector does not rerun training. It gathers manifests,
 metrics, baselines, file hashes, and quality-control summaries from existing
@@ -300,7 +389,7 @@ python main.py --step docking_eval -- \
 |-- src/evopoint_da/docking_eval/
 |                             Secondary docking evaluation code
 |-- tests/                    Unit and smoke tests
-|-- main.py                   Pipeline alias entry point
+|-- main.py                   Pipeline and workflow entry point
 |-- train.py                  Hydra/PyTorch Lightning training entry point
 ```
 
